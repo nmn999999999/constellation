@@ -33,8 +33,11 @@ Thumbs.db
 # ML training artifacts
 train/*.pt
 train/*.onnx
+train/*.onnx.data
 train/*.npy
 train/coords.txt
+__pycache__/
+*.pyc
 
 # Internal project instructions (contains local machine paths)
 AGENTS.md
