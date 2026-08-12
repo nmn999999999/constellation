@@ -1,4 +1,6 @@
-# Particle Codec
+# Constellation
+
+*Data hidden in a starfield.*
 
 A visual data encoding system that maps binary data into particle positions on a grid. Data is encoded as the presence
 or absence of particles at specific grid cells, with the grid layout deterministically shuffled based on a user-specific
