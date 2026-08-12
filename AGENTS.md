@@ -37,7 +37,9 @@
 │   ├── test_error_safety.cpp      # 错误安全与错误反馈测试（非法参数/损坏帧诊断）
 │   ├── test_decode_image.cpp      # 端到端编解码测试
 │   ├── test_viewer_decode.cpp     # viewer 风格编解码测试（104/104 粒子）
-│   └── test_viewer_export.cpp     # export 风格编解码测试（128/128 粒子）
+│   ├── test_viewer_export.cpp     # export 风格编解码测试（128/128 粒子）
+│   ├── test_video_generate.cpp    # 多帧动画生成（Perlin 漂移 BMP 序列，供 ffmpeg 合成）
+│   └── test_video_decode.cpp      # 视频抽帧解码/多帧组装/原始数据比对
 ├── CMakeLists.txt                 # CMake 配置（C++17）
 ├── AGENTS.md                      # ← 你正在看的这个
 └── README.md
@@ -84,6 +86,8 @@ build\error_safety_test.exe   # 错误安全/错误反馈测试
 build\test_decode_image.exe   # 小 blob 端到端测试
 build\test_viewer_decode.exe  # 104/104 粒子 viewer 测试
 build\test_viewer_export.exe  # 生成 480×480 export 测试图
+build\test_video_generate.exe # 生成多帧动画 BMP 序列（默认 90 帧/1200 字节）
+build\test_video_decode.exe   # 视频抽帧解码：test_video_decode.exe <帧目录> [payload.bin]
 build\test_precision.exe      # 精度基准（召回率/解码成功率）
 build\decode_image.exe        # CLI 解码器
 # 使用：decode_image.exe image.png [grid_cols] [grid_rows]
@@ -165,6 +169,14 @@ maxPayloadPerFrame ≈ (3600 - 微粒映射开销) 字节
 ### 3. 测试图片路径
 
 `particle_field.png` 在 `U:\Users\nmn99\Documents\` 是旧版导出（pr=12），不可解码。
+
+### 4. 视频编码约束（2026-08-12 实测）
+
+- 480×480@30fps H.264：CRF ≤ 38（约 ≥127 kb/s）时多帧数据 100% 恢复；
+  CRF 40+（约 103 kb/s）起出现 CrcMismatch，CRF 42+ 全部失败
+- 分辨率不得低于 8px/格：240p（4px/格）下粒子核心糊连，无法解码
+- 动画冗余有效：每数据帧渲染 30 帧动画，单帧损坏不影响恢复
+  （CRF 38 实测 89/90 帧成功，数据仍完整还原）
 
 ---
 
