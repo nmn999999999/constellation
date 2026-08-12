@@ -242,10 +242,17 @@ def decode_rate(codec, model, loader, device, angle_range, threshold=0.5,
     total = 0
     ok = 0
     for x, y in loader:
-        photo, theta_target = warp_batch(x, angle_range, device)
         if detector_only:
-            logits = model.net(rectify(photo, theta_target))
+            # Canonical 480 -> 240, no geometry warp: GridCalibrator handles
+            # geometry at inference, so the detector only ever sees clean
+            # canonical images (warping here would add artificial black
+            # borders at zoom-in, hurting edge cells).
+            photo = F.interpolate(x.to(device).float().div_(255.0),
+                                  size=(IMG_SIZE, IMG_SIZE),
+                                  mode="bilinear", align_corners=False)
+            logits = model.net(photo)
         else:
+            photo, theta_target = warp_batch(x, angle_range, device)
             _, logits = model(photo)
         probs = torch.sigmoid(logits).squeeze(1).cpu().numpy()
         for i in range(probs.shape[0]):
@@ -262,10 +269,13 @@ def bit_accuracy(model, loader, device, angle_range, detector_only=False):
     model.eval()
     correct = total = 0
     for x, y in loader:
-        photo, theta_target = warp_batch(x, angle_range, device)
         if detector_only:
-            logits = model.net(rectify(photo, theta_target))
+            photo = F.interpolate(x.to(device).float().div_(255.0),
+                                  size=(IMG_SIZE, IMG_SIZE),
+                                  mode="bilinear", align_corners=False)
+            logits = model.net(photo)
         else:
+            photo, theta_target = warp_batch(x, angle_range, device)
             _, logits = model(photo)
         preds = (torch.sigmoid(logits) >= 0.5).float()
         correct += (preds == y.to(device).float().unsqueeze(1)).sum().item()
@@ -382,17 +392,23 @@ def main():
         total_aff = 0.0
         for x, y in train_loader:
             y = y.to(device).float().unsqueeze(1)
-            photo, theta_target = warp_batch(x, angle_range, device,
-                                             scale_range, shift)
             if args.detector_only:
                 # Hybrid mode: geometry is handled by GridCalibrator at
-                # inference, so the detection head only ever sees canonical
-                # (teacher-forced rectified) images.
-                logits = model.net(rectify(photo, theta_target))
+                # inference, so the detection head only ever sees clean
+                # canonical 240 images (no warp -> no artificial black
+                # borders eating edge cells).
+                photo = F.interpolate(x.to(device).float().div_(255.0),
+                                      size=(IMG_SIZE, IMG_SIZE),
+                                      mode="bilinear", align_corners=False)
+                photo = torch.clamp(photo + torch.randn_like(photo) * 0.01,
+                                    0.0, 1.0)
+                logits = model.net(photo)
                 loss = loss_fn(logits, y)
                 bce = loss
                 aff = torch.zeros((), device=device)
             else:
+                photo, theta_target = warp_batch(x, angle_range, device,
+                                                 scale_range, shift)
                 params_pred = model.fc_loc(
                     model.loc(photo).view(photo.size(0), -1))
                 theta_pred = theta_from_params(params_pred)
