@@ -80,6 +80,24 @@ with the real codec.
 
    The code writes caches to `/kaggle/working` (writable), not `/kaggle/input`.
 
+## Run on Modal (free, no credit card)
+
+Modal's no-card free tier is $5/month of compute credits (email or GitHub
+signup, no phone, no real-name) - enough for ~25 T4-GPU-hours, and one full
+training run costs well under $1.
+
+```bash
+pip install modal
+modal setup                                  # browser sign-in
+cd train
+modal run train_modal.py                     # full 8000/40 run
+# smaller run: modal run train_modal.py -- --epochs 20 --train-size 3000
+```
+
+`particle_detector.pt` / `.onnx` / `.onnx.data` are returned and written into
+`train/` automatically. No persistent volume is used, so there is no storage
+bill - but a dropped session reruns from scratch (use Lightning AI for resume).
+
 ## Expected behavior
 
 - `bce` (detection loss) and `affine` (STN geometry MSE) should both drop.
