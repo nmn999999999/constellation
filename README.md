@@ -3,8 +3,8 @@
 *Data hidden in a starfield.*
 
 A visual data encoding system that maps binary data into particle positions on a grid. Data is encoded as the presence
-or absence of particles at specific grid cells, with the grid layout deterministically shuffled based on a user-specific
-seed. There is no key or username: the mapping is fixed and public, so anyone who has the image can decode it.
+or absence of particles at specific grid cells, with the grid layout deterministically shuffled based on a fixed
+built-in seed. There is no key or username: the mapping is public, so anyone who has the image can decode it.
 
 ## How It Works
 
@@ -23,15 +23,20 @@ seed. There is no key or username: the mapping is fixed and public, so anyone wh
 ```
 ├── include/particle_codec/      # Public headers
 │   ├── codec.h
+│   ├── error.h                  # ErrorCode / ErrorInfo / Result<T>
+│   ├── grid_calibrator.h        # Affine grid calibration for photographs
 │   ├── frame_builder.h
 │   ├── coordinate_encoder.h
 │   ├── mapping_restorer.h
 │   ├── frame_parser.h
 │   ├── pseudo_random.h
 │   ├── grid_mapping.h
-│   └── hamming.h
+│   ├── hamming.h
+│   └── perlin_noise.h
 ├── src/                         # Implementations
 │   ├── codec.cpp
+│   ├── error.cpp
+│   ├── grid_calibrator.cpp
 │   ├── coordinate_encoder.cpp
 │   ├── frame_builder.cpp
 │   ├── frame_parser.cpp
@@ -47,12 +52,15 @@ seed. There is no key or username: the mapping is fixed and public, so anyone wh
 │   └── decode_image.cpp         # CLI image decoder (stb_image)
 ├── tests/
 │   ├── test_codec.cpp           # 15 unit tests
+│   ├── test_error_safety.cpp    # Validation & error-feedback tests
+│   ├── test_grid_calibrator.cpp # Rotation/scale/shift calibration tests
 │   ├── test_decode_image.cpp    # End-to-end encode/render/decode
 │   ├── test_viewer_decode.cpp   # Viewer-style roundtrip (104/104)
 │   ├── test_viewer_export.cpp   # Export-style roundtrip (128/128)
+│   ├── test_video_generate.cpp  # Multi-frame animation generator (ffmpeg input)
+│   ├── test_video_decode.cpp    # Video-frame decode + multi-frame fusion
 │   └── test_precision.cpp       # Precision benchmark (recall/decode stats)
 ├── CMakeLists.txt               # CMake build
-├── AGENTS.md                    # Project instructions
 └── README.md
 ```
 
@@ -90,6 +98,25 @@ seed. There is no key or username: the mapping is fixed and public, so anyone wh
 - **Geometry calibration** — automatically recovers rotated, zoomed or shifted
   photographs by fitting an affine transform to the detected particle grid
   (`GridCalibrator`); the CLI tries it after the axis-aligned methods fail
+
+## Photographs & Video
+
+The default decode path assumes an axis-aligned, full-frame particle field. If
+the image is a photograph — rotated, zoomed or shifted — `decode_image`
+automatically falls back to `GridCalibrator`, which fits an affine transform
+(rotation + scale + translation) to the detected centroids and tries all four
+orientation variants.
+
+Video adds redundancy: `test_video_generate` renders a multi-frame animation
+(Perlin drift, optional crossfade and Hamming ECC), `ffmpeg` composes it into a
+video, and `test_video_decode` decodes every frame, locks the global geometry
+from the first calibrated frame, fuses per-sequence centroids (majority
+voting), re-calibrates the averaged set, and falls back to ECC correction.
+
+Measured robustness (480×480@30 fps): H.264 CRF ≤ 38 (~127 kb/s) decodes
+completely; VP9/AV1 recover the full payload even at ~60 KB for a 3.8-second
+video; a 90%-zoomed video with black borders recovers 96/114 frames and the
+entire payload via calibration + fusion.
 
 ## Related Work
 
@@ -147,10 +174,21 @@ cmake --build build
 build/codec_demo            # build\codec_demo.exe on Windows
 
 # Run unit tests
-build/codec_test            # build\codec_test.exe on Windows
+build/codec_test                # core unit tests
+build/error_safety_test         # validation & error-feedback tests
+build/test_grid_calibrator      # geometry calibration tests
 
 # CLI image decoder
+# Tries color/DT detection first, then automatic geometry calibration.
 build/decode_image image.png [grid_cols] [grid_rows]
+
+# Multi-frame video pipeline (requires ffmpeg)
+build/test_video_generate build/video_test/anim 1752 6
+ffmpeg -framerate 30 -i build/video_test/anim/anim_%03d.bmp \
+       -c:v libx264 -pix_fmt yuv420p -crf 23 build/video_test/video.mp4
+ffmpeg -i build/video_test/video.mp4 -fps_mode vfr \
+       build/video_test/frames/f_%03d.png
+build/test_video_decode build/video_test/frames build/video_test/payload.bin
 ```
 
 On Windows the project is built with MinGW (e.g. the toolchain bundled with JetBrains CLion) plus CMake/Ninja. The C++
