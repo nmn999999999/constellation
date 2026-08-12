@@ -236,13 +236,17 @@ class ParticleDetector(nn.Module):
 
 
 @torch.no_grad()
-def decode_rate(codec, model, loader, device, angle_range, threshold=0.5):
+def decode_rate(codec, model, loader, device, angle_range, threshold=0.5,
+                detector_only=False):
     model.eval()
     total = 0
     ok = 0
     for x, y in loader:
-        photo, _ = warp_batch(x, angle_range, device)
-        _, logits = model(photo)
+        photo, theta_target = warp_batch(x, angle_range, device)
+        if detector_only:
+            logits = model.net(rectify(photo, theta_target))
+        else:
+            _, logits = model(photo)
         probs = torch.sigmoid(logits).squeeze(1).cpu().numpy()
         for i in range(probs.shape[0]):
             total += 1
@@ -254,12 +258,15 @@ def decode_rate(codec, model, loader, device, angle_range, threshold=0.5):
 
 
 @torch.no_grad()
-def bit_accuracy(model, loader, device, angle_range):
+def bit_accuracy(model, loader, device, angle_range, detector_only=False):
     model.eval()
     correct = total = 0
     for x, y in loader:
-        photo, _ = warp_batch(x, angle_range, device)
-        _, logits = model(photo)
+        photo, theta_target = warp_batch(x, angle_range, device)
+        if detector_only:
+            logits = model.net(rectify(photo, theta_target))
+        else:
+            _, logits = model(photo)
         preds = (torch.sigmoid(logits) >= 0.5).float()
         correct += (preds == y.to(device).float().unsqueeze(1)).sum().item()
         total += y.numel()
@@ -305,6 +312,10 @@ def main():
     ap.add_argument("--warmup-steps", type=int, default=500,
                     help="first N optimizer steps teacher-force rectification "
                          "(loc head trains on MSE only, det head on canonical)")
+    ap.add_argument("--detector-only", action="store_true",
+                    help="train ONLY the detection subnet on teacher-forced "
+                         "rectified images (no STN/localization). Use this "
+                         "for the hybrid GridCalibrator + CNN decoder.")
     ap.add_argument("--out", default="particle_detector.pt")
     ap.add_argument("--onnx", default="particle_detector.onnx")
     ap.add_argument("--checkpoint", default="checkpoint_last.pt")
@@ -356,8 +367,16 @@ def main():
     easy = (1.0, (0.97, 1.03), 4.0)
     print("device:", device, "params:",
           sum(p.numel() for p in model.parameters()))
+    if args.detector_only:
+        for p in model.loc.parameters():
+            p.requires_grad_(False)
+        for p in model.fc_loc.parameters():
+            p.requires_grad_(False)
     for epoch in range(start_epoch, args.epochs):
-        angle_range, scale_range, shift = easy if epoch < args.curriculum_epochs else full
+        if args.detector_only:
+            angle_range, scale_range, shift = full
+        else:
+            angle_range, scale_range, shift = easy if epoch < args.curriculum_epochs else full
         model.train()
         total_bce = 0.0
         total_aff = 0.0
@@ -365,19 +384,30 @@ def main():
             y = y.to(device).float().unsqueeze(1)
             photo, theta_target = warp_batch(x, angle_range, device,
                                              scale_range, shift)
-            params_pred = model.fc_loc(
-                model.loc(photo).view(photo.size(0), -1))
-            theta_pred = theta_from_params(params_pred)
-            if global_step < args.warmup_steps:
-                # Teacher forcing: rectify with the TRUE affine so the
-                # detection head learns on canonical images, while the loc
-                # head gets its direct MSE signal without BCE interference.
+            if args.detector_only:
+                # Hybrid mode: geometry is handled by GridCalibrator at
+                # inference, so the detection head only ever sees canonical
+                # (teacher-forced rectified) images.
                 logits = model.net(rectify(photo, theta_target))
+                loss = loss_fn(logits, y)
+                bce = loss
+                aff = torch.zeros((), device=device)
             else:
-                logits = model.net(rectify(photo, theta_pred))
-            bce = loss_fn(logits, y)
-            aff = affine_loss(params_pred, params_from_theta(theta_target))
-            loss = bce + args.affine_w * aff
+                params_pred = model.fc_loc(
+                    model.loc(photo).view(photo.size(0), -1))
+                theta_pred = theta_from_params(params_pred)
+                if global_step < args.warmup_steps:
+                    # Teacher forcing: rectify with the TRUE affine so the
+                    # detection head learns on canonical images, while the
+                    # loc head gets its direct MSE signal without BCE
+                    # interference.
+                    logits = model.net(rectify(photo, theta_target))
+                else:
+                    logits = model.net(rectify(photo, theta_pred))
+                bce = loss_fn(logits, y)
+                aff = affine_loss(params_pred,
+                                  params_from_theta(theta_target))
+                loss = bce + args.affine_w * aff
             opt.zero_grad()
             loss.backward()
             opt.step()
@@ -385,20 +415,23 @@ def main():
             total_bce += bce.item() * x.size(0)
             total_aff += aff.item() * x.size(0)
         scheduler.step()
-        acc = bit_accuracy(model, val_loader, device, full[0])
+        acc = bit_accuracy(model, val_loader, device, full[0],
+                           args.detector_only)
         n_tr = len(train_ds)
-        phase = "tf " if global_step < args.warmup_steps else "jit"
+        phase = "det" if args.detector_only else (
+            "tf " if global_step < args.warmup_steps else "jit")
         if (epoch + 1) % 5 == 0 or epoch == start_epoch:
             rate, ok, tot = decode_rate(codec, model, val_loader, device,
-                                        full[0])
+                                        full[0], detector_only=args.detector_only)
             print("epoch %2d [%s +-%.0f deg] bce %.4f affine %.5f bit-acc %.4f "
                   "decode %.1f%% (%d/%d)" %
-                  (epoch + 1, phase, angle_range, total_bce / n_tr,
-                   total_aff / n_tr, acc, rate * 100, ok, tot))
+                  (epoch + 1, phase, angle_range,
+                   total_bce / n_tr, total_aff / n_tr,
+                   acc, rate * 100, ok, tot))
         else:
             print("epoch %2d [%s +-%.0f deg] bce %.4f affine %.5f bit-acc %.4f"
-                  % (epoch + 1, phase, angle_range, total_bce / n_tr,
-                     total_aff / n_tr, acc))
+                  % (epoch + 1, phase, angle_range,
+                     total_bce / n_tr, total_aff / n_tr, acc))
         if acc > best:
             best = acc
             torch.save(model.state_dict(), args.out)

@@ -16,6 +16,33 @@ encoder (`particle_codec_py.py`), which is verified byte-for-byte against the
 C++ library (see `consistency_check.py`), so whatever the model learns decodes
 with the real codec.
 
+## Hybrid mode (recommended): detector-only + GridCalibrator
+
+The full STN variant (localization head + teacher forcing) was tested through
+40 epochs on a cloud GPU: the detection head learns canonical images well,
+but the localization head never learns the general photo->affine mapping
+(affine MSE stays at the identity baseline, bit-acc stuck ~77%). Geometry
+estimation is therefore left to the classical `GridCalibrator` (RANSAC over
+detected centroids, tested for rotation <=5 deg / scale 0.9-1.1), and the CNN
+only maps an already-rectified image to the 60x60 bitmap:
+
+    photo -> color detection -> GridCalibrator -> warp to canonical 240
+          -> CNN detection head -> 60x60 bitmap -> codec + CRC repair
+
+Train the detection head alone (fast, reliable - reaches ~98.5% bit-acc
+locally with just 200 frames / 4 epochs):
+
+    python train_detector.py --detector-only --epochs 30 \
+        --train-size 8000 --val-size 1000 --batch-size 64
+
+Then export the weights and decode with the C++ hybrid CLI:
+
+    python export_net.py particle_detector.pt particle_detector.bin
+    build\decode_ml.exe photo.png particle_detector.bin
+
+Verified end-to-end locally: canonical export image and a 2-deg / 0.95-scale
+photograph-style warp both recover the full payload (886/886 cells detected).
+
 ## Recipe (v2, 2026-08-12)
 
 - Canonical 480x480 renders are cached once; every batch is warped on-the-fly

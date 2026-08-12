@@ -107,6 +107,14 @@ automatically falls back to `GridCalibrator`, which fits an affine transform
 (rotation + scale + translation) to the detected centroids and tries all four
 orientation variants.
 
+There is also an ML-assisted decoder (`decode_ml`): a small CNN
+(train/detector-only mode, `train/train_detector.py --detector-only`)
+classifies the 60×60 cells on the GridCalibrator-rectified image, replacing
+the color-threshold heuristic for the bitmap. Export the weights with
+`train/export_net.py`, then `build\decode_ml.exe photo.png particle_detector.bin`.
+The CNN inference is hand-written C++ (no external ML runtime), keeping the
+single-file, no-DLL build.
+
 Video adds redundancy: `test_video_generate` renders a multi-frame animation
 (Perlin drift, optional crossfade and Hamming ECC), `ffmpeg` composes it into a
 video, and `test_video_decode` decodes every frame, locks the global geometry

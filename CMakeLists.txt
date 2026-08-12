@@ -32,6 +32,7 @@ add_library(particle_codec
         src/frame_parser.cpp
         src/codec.cpp
         src/hamming.cpp
+        src/particle_net.cpp
 )
 
 target_include_directories(particle_codec PUBLIC include)
@@ -55,6 +56,10 @@ target_link_libraries(test_grid_calibrator PRIVATE particle_codec ${MINGW_PTHREA
 # CLI image decoder
 add_executable(decode_image demo/decode_image.cpp ${MINGW_COMPAT_SRC})
 target_link_libraries(decode_image PRIVATE particle_codec ${MINGW_PTHREAD_LINK})
+
+# Hybrid ML decoder (GridCalibrator geometry + trained CNN detection)
+add_executable(decode_ml demo/decode_ml.cpp ${MINGW_COMPAT_SRC})
+target_link_libraries(decode_ml PRIVATE particle_codec ${MINGW_PTHREAD_LINK})
 
 # Standalone end-to-end tests (Windows, render BMP then decode)
 add_executable(test_decode_image tests/test_decode_image.cpp ${MINGW_COMPAT_SRC})
