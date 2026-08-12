@@ -7,11 +7,16 @@ Why Modal for this project:
 
 Setup (one time, locally):
     pip install modal
-    modal setup          # opens browser; sign in with email or GitHub
+    python -m modal setup   # opens browser; sign in with email or GitHub
+                            # (or: modal setup, if the Scripts dir is on PATH)
 
 Run (from the train/ directory):
-    modal run train_modal.py                            # full 8000/40
-    modal run train_modal.py -- --epochs 20 --train-size 3000
+    python -m modal run train_modal.py                  # full 8000/40
+    python -m modal run train_modal.py -- --epochs 20 --train-size 3000
+
+IMPORTANT: always launch through `modal run` (or `python -m modal run`).
+Running `python train_modal.py` directly cannot work - the app needs Modal
+to hydrate the cloud function first.
 
 When the run finishes, particle_detector.pt / .onnx / .onnx.data are
 written next to this script automatically (they are returned from the cloud

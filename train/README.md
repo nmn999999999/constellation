@@ -88,15 +88,17 @@ training run costs well under $1.
 
 ```bash
 pip install modal
-modal setup                                  # browser sign-in
+python -m modal setup                        # browser sign-in (Windows-safe)
 cd train
-modal run train_modal.py                     # full 8000/40 run
-# smaller run: modal run train_modal.py -- --epochs 20 --train-size 3000
+python -m modal run train_modal.py           # full 8000/40 run
+# smaller run: python -m modal run train_modal.py -- --epochs 20 --train-size 3000
 ```
 
 `particle_detector.pt` / `.onnx` / `.onnx.data` are returned and written into
 `train/` automatically. No persistent volume is used, so there is no storage
-bill - but a dropped session reruns from scratch (use Lightning AI for resume).
+bill - but a dropped session reruns from scratch (use Lightning AI for
+resume). Always launch with `modal run` / `python -m modal run`; running the
+script directly with `python` cannot hydrate the cloud app.
 
 ## Expected behavior
 
