@@ -127,6 +127,11 @@ counts and the stage where each method broke) and uses distinct exit codes:
 `0` decoded, `1` usage/argument error, `2` I/O error, `3` decode failed,
 `4` internal error.
 
+## License
+
+[MIT](LICENSE) — free to use, modify and distribute, including commercially;
+just keep the copyright notice.
+
 ## Building & Running
 
 ### CMake (all platforms)
