@@ -43,16 +43,22 @@ static inline bool is_cyan(unsigned char r, unsigned char g, unsigned char b) {
 
 // Load an image and reduce it to a 1 byte/pixel foreground mask immediately,
 // so the full RGBA buffer (4 bytes/pixel) is freed before detection starts.
-static std::vector<uint8_t> load_cyan_mask(const std::string &path, int &width, int &height) {
+static std::vector<uint8_t> load_cyan_mask(const std::string &path, int &width, int &height,
+                                           std::vector<float> *weights = nullptr) {
     int channels;
     unsigned char *data = stbi_load(path.c_str(), &width, &height, &channels, 3);
     if (!data) return {};
 
     int total = width * height;
     std::vector<uint8_t> mask(total, 0);
+    std::vector<float> w(total, 0);
     for (int i = 0; i < total; i++) {
-        mask[i] = is_cyan(data[i * 3], data[i * 3 + 1], data[i * 3 + 2]) ? 1 : 0;
+        if (is_cyan(data[i * 3], data[i * 3 + 1], data[i * 3 + 2])) {
+            mask[i] = 1;
+            w[i] = static_cast<float>(data[i * 3 + 1] + data[i * 3 + 2]);
+        }
     }
+    if (weights) *weights = std::move(w);
     stbi_image_free(data);
     return mask;
 }
@@ -241,7 +247,10 @@ static std::vector<Contour> detect_by_distance_transform(
 // Color flood-fill. The mask is consumed in place (visited cells are zeroed)
 // and a plain vector is used as the stack, avoiding a separate visited buffer
 // and per-pixel queue allocations.
-static std::vector<Contour> detect_by_color(std::vector<uint8_t> &mask, int w, int h) {
+// Intensity-weighted flood-fill: bright core pixels weigh more than the dim
+// glow, so centroids land on the particle core even under compression blur.
+static std::vector<Contour> detect_by_color(std::vector<uint8_t> &mask, int w, int h,
+                                            const std::vector<float> *weights = nullptr) {
     std::vector<Contour> contours;
     std::vector<int> stack;
     const int dx8[] = {-1, 0, 1, -1, 1, -1, 0, 1};
@@ -252,7 +261,7 @@ static std::vector<Contour> detect_by_color(std::vector<uint8_t> &mask, int w, i
             int idx = y * w + x;
             if (mask[idx] == 0) continue;
 
-            double sumX = 0, sumY = 0;
+            double sumX = 0, sumY = 0, sumW = 0;
             int count = 0;
             stack.clear();
             stack.push_back(idx);
@@ -263,8 +272,10 @@ static std::vector<Contour> detect_by_color(std::vector<uint8_t> &mask, int w, i
                 stack.pop_back();
                 int cx = cur % w;
                 int cy = cur / w;
-                sumX += cx;
-                sumY += cy;
+                double wt = weights ? (*weights)[cur] : 1.0;
+                sumX += cx * wt;
+                sumY += cy * wt;
+                sumW += wt;
                 count++;
                 for (int d = 0; d < 8; d++) {
                     int nx = cx + dx8[d], ny = cy + dy8[d];
@@ -275,8 +286,8 @@ static std::vector<Contour> detect_by_color(std::vector<uint8_t> &mask, int w, i
                     stack.push_back(nidx);
                 }
             }
-            if (count >= 3) {
-                contours.push_back({sumX / count, sumY / count, count});
+            if (count >= 3 && sumW > 0) {
+                contours.push_back({sumX / sumW, sumY / sumW, count});
             }
         }
     }
@@ -310,7 +321,8 @@ int main(int argc, char *argv[]) {
     }
 
     int width, height;
-    auto mask = load_cyan_mask(imagePath, width, height);
+    std::vector<float> cyanWeights;
+    auto mask = load_cyan_mask(imagePath, width, height, &cyanWeights);
     if (mask.empty()) {
         std::cerr << "Error: failed to load image: " << imagePath << std::endl;
         return 1;
@@ -363,7 +375,7 @@ int main(int argc, char *argv[]) {
         // Method 1: Color flood-fill (runs on a copy so the mask stays intact for DT)
         {
             std::vector<uint8_t> maskCopy = mask;
-            colorContours = detect_by_color(maskCopy, width, height);
+            colorContours = detect_by_color(maskCopy, width, height, &cyanWeights);
             methods.push_back(run_method(
                 "color flood-fill (centered)",
                 contours_to_grid(colorContours, gridCols, gridRows, width, height),

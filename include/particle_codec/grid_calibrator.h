@@ -36,6 +36,13 @@ namespace particle_codec {
             }
         };
 
+        // Least-squares affine fit: minimizes sum |T(p) - g|^2 over point
+        // pairs (p in image space, g on the canonical grid). Returns false
+        // when fewer than 3 pairs are given or the fit is degenerate.
+        static bool fitAffine(const std::vector<std::pair<double, double> > &pts,
+                              const std::vector<std::pair<double, double> > &grd,
+                              Affine &out);
+
         // Fits the affine map so that mapped centroids land on grid node
         // centers (col + 0.5, row + 0.5). Returns an invalid Affine when the
         // field is too small, too sparse, or has no dominant spacing.

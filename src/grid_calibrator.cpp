@@ -24,11 +24,12 @@ namespace particle_codec {
             return ang;
         }
 
-        // Least-squares affine fit: minimize sum |T(p) - g|^2 over the given
-        // point pairs (p in image space, g on the canonical grid).
-        bool fitAffine(const std::vector<std::pair<double, double> > &pts,
-                       const std::vector<std::pair<double, double> > &grd,
-                       GridCalibrator::Affine &out) {
+    } // namespace
+
+    bool GridCalibrator::fitAffine(
+        const std::vector<std::pair<double, double> > &pts,
+        const std::vector<std::pair<double, double> > &grd,
+        GridCalibrator::Affine &out) {
             const int n = static_cast<int>(pts.size());
             if (n < 3) return false;
             // Centered normal equations for x' = a*x + b*y + c.
@@ -61,8 +62,7 @@ namespace particle_codec {
             out.e = (sygyc * sxxc - sxgyc * sxyc) / det;
             out.f = mgy - out.d * mx - out.e * my;
             return true;
-        }
-    } // namespace
+    }
 
     GridCalibrator::Affine GridCalibrator::calibrate(
         const std::vector<std::pair<double, double> > &centroids,

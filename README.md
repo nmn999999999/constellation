@@ -116,7 +116,10 @@ voting), re-calibrates the averaged set, and falls back to ECC correction.
 Measured robustness (480×480@30 fps): H.264 CRF ≤ 38 (~127 kb/s) decodes
 completely; VP9/AV1 recover the full payload even at ~60 KB for a 3.8-second
 video; a 90%-zoomed video with black borders recovers 96/114 frames and the
-entire payload via calibration + fusion.
+entire payload via calibration + fusion. Rotated fields are recovered by
+multi-frame fusion: intensity-weighted centroids, bundle-adjustment over all
+frames, majority voting, and a CRC-guided single/double bit repair that fixes
+the last 1–2 residual cell errors.
 
 ## Related Work
 

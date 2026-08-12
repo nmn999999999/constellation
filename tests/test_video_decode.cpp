@@ -1,4 +1,4 @@
-// Video-frame decoder: loads a directory of PNG/BMP frames extracted from a
+﻿// Video-frame decoder: loads a directory of PNG/BMP frames extracted from a
 // video, detects particles, decodes each frame, assembles the multi-frame
 // payload and (optionally) verifies it against the original payload.bin.
 //
@@ -11,6 +11,8 @@
 #include <vector>
 #include <filesystem>
 #include <algorithm>
+#include <map>
+#include <unordered_map>
 #include <cstdio>
 
 #define STB_IMAGE_IMPLEMENTATION
@@ -27,8 +29,11 @@ static inline bool is_cyan(unsigned char r, unsigned char g, unsigned char b) {
     return r < 80 && g > 100 && b > 100 && b > r + 20 && g > r + 20;
 }
 
-// Color flood-fill 8-neighbour clustering (same approach as decode_image.cpp).
-static std::vector<Detection> detect_by_color(std::vector<uint8_t> &mask, int w, int h) {
+// Color flood-fill 8-neighbour clustering with intensity-weighted centroids:
+// bright core pixels weigh more than the dim glow, so the centroid lands on
+// the particle core even under compression blur.
+static std::vector<Detection> detect_by_color(std::vector<uint8_t> &mask, int w, int h,
+                                              const std::vector<float> *weights = nullptr) {
     std::vector<Detection> detections;
     std::vector<int> stack;
     const int dx8[] = {-1, 0, 1, -1, 1, -1, 0, 1};
@@ -39,7 +44,7 @@ static std::vector<Detection> detect_by_color(std::vector<uint8_t> &mask, int w,
             int idx = y * w + x;
             if (mask[idx] == 0) continue;
 
-            double sumX = 0, sumY = 0;
+            double sumX = 0, sumY = 0, sumW = 0;
             int count = 0;
             stack.clear();
             stack.push_back(idx);
@@ -50,8 +55,10 @@ static std::vector<Detection> detect_by_color(std::vector<uint8_t> &mask, int w,
                 stack.pop_back();
                 int cx = cur % w;
                 int cy = cur / w;
-                sumX += cx;
-                sumY += cy;
+                double wt = weights ? (*weights)[cur] : 1.0;
+                sumX += cx * wt;
+                sumY += cy * wt;
+                sumW += wt;
                 count++;
                 for (int d = 0; d < 8; d++) {
                     int nx = cx + dx8[d], ny = cy + dy8[d];
@@ -62,7 +69,8 @@ static std::vector<Detection> detect_by_color(std::vector<uint8_t> &mask, int w,
                     stack.push_back(nidx);
                 }
             }
-            if (count >= 3) detections.push_back({sumX / count, sumY / count, count});
+            if (count >= 3 && sumW > 0)
+                detections.push_back({sumX / sumW, sumY / sumW, count});
         }
     }
     return detections;
@@ -106,6 +114,7 @@ int main(int argc, char *argv[]) {
     // missing particles on individual frames are filled by the others.
     std::vector<std::vector<std::pair<double, double> > > fusion(64);
     std::vector<int> fusionFrames(64, 0);
+    std::vector<std::pair<double, double> > allRaw; // raw image centroids of every frame
     // Video geometry is static across frames: once the first frame is
     // calibrated, reuse that exact transform (including orientation and
     // translation) so fused cells stay consistent.
@@ -131,6 +140,7 @@ int main(int argc, char *argv[]) {
     int failFrames = 0;        // frames that could not be decoded at all
     std::vector<int> seqSuccess(64, 0); // data-frame success counts
     std::vector<std::string> failByStage;
+    int globalW = 0, globalH = 0; // image size of the first loaded frame
 
     for (size_t fi = 0; fi < files.size(); fi++) {
         int w = 0, h = 0, channels = 0;
@@ -140,14 +150,22 @@ int main(int argc, char *argv[]) {
             failByStage.push_back("load-failed");
             continue;
         }
+        if (globalW == 0) {
+            globalW = w;
+            globalH = h;
+        }
 
         int total = w * h;
         std::vector<uint8_t> mask(total, 0);
+        std::vector<float> weights(total, 0);
         for (int i = 0; i < total; i++)
-            mask[i] = is_cyan(img[i * 3], img[i * 3 + 1], img[i * 3 + 2]) ? 1 : 0;
+            if (is_cyan(img[i * 3], img[i * 3 + 1], img[i * 3 + 2])) {
+                mask[i] = 1;
+                weights[i] = static_cast<float>(img[i * 3 + 1] + img[i * 3 + 2]);
+            }
         stbi_image_free(img);
 
-        auto detections = detect_by_color(mask, w, h);
+        auto detections = detect_by_color(mask, w, h, &weights);
         auto gp = direct_grid(detections, w, h, gridCols, gridRows);
 
         std::vector<std::pair<double, double> > centroids;
@@ -242,11 +260,15 @@ int main(int argc, char *argv[]) {
         if (raw) {
             auto rh = FrameHeader::tryParse(raw.value());
             if (rh && rh->seq >= 0 && rh->seq < static_cast<int>(fusion.size())) {
-                for (const auto &p: finalPoints)
-                    fusion[rh->seq].push_back(p);
+                // Store raw image centroids; mapping happens after the joint
+                // geometry optimization so all frames share one transform.
+                for (const auto &c: centroids)
+                    fusion[rh->seq].push_back(c);
                 fusionFrames[rh->seq]++;
             }
         }
+        for (const auto &c: centroids)
+            allRaw.push_back(c);
 
         if (!result.ok()) {
             failFrames++;
@@ -298,68 +320,140 @@ int main(int argc, char *argv[]) {
         std::cout << std::endl;
     }
 
-    // Fuse collected frames per sequence: average the mapped centroids of each
-    // grid cell across all animation frames, then decode the fused set.
+    // Bundle adjustment: every frame shares one affine geometry. Optimize the
+    // transform over the raw image centroids of all frames so detection noise
+    // averages out and the systematic per-cell offsets that sink individual
+    // frames disappear.
+    GridCalibrator::Affine opt;
+    opt.valid = true;
+    if (haveGlobalMap) {
+        opt = globalMap;
+    } else if (globalW > 0) {
+        // Axis-aligned fallback: pixel -> unit grid by image size.
+        opt.a = static_cast<double>(gridCols) / globalW;
+        opt.e = static_cast<double>(gridRows) / globalH;
+        opt.b = opt.c = opt.d = opt.f = 0;
+    }
+    int baIter = 0;
+    if (allRaw.size() >= 64) {
+        for (int iter = 0; iter < 8; iter++) {
+            std::map<int, std::pair<double, double> > cellSum;
+            std::map<int, int> cellCount;
+            for (const auto &p: allRaw) {
+                auto m = opt.map(p.first, p.second);
+                int col = std::clamp(static_cast<int>(std::floor(m.first)),
+                                     0, gridCols - 1);
+                int row = std::clamp(static_cast<int>(std::floor(m.second)),
+                                     0, gridRows - 1);
+                double ex = m.first - (col + 0.5), ey = m.second - (row + 0.5);
+                if (ex * ex + ey * ey > 0.35 * 0.35) continue;
+                int idx = row * gridCols + col;
+                cellSum[idx].first += p.first; // average in image space
+                cellSum[idx].second += p.second;
+                cellCount[idx]++;
+            }
+            std::vector<std::pair<double, double> > pts, grd;
+            for (const auto &kv: cellSum) {
+                int idx = kv.first;
+                if (cellCount[idx] < 2) continue;
+                pts.emplace_back(kv.second.first / cellCount[idx],
+                                 kv.second.second / cellCount[idx]);
+                grd.emplace_back((idx % gridCols) + 0.5, (idx / gridCols) + 0.5);
+            }
+            if (pts.size() < 9) break;
+            GridCalibrator::Affine next = opt;
+            if (!GridCalibrator::fitAffine(pts, grd, next)) break;
+            double delta = std::abs(next.a - opt.a) + std::abs(next.b - opt.b) +
+                           std::abs(next.c - opt.c) + std::abs(next.d - opt.d) +
+                           std::abs(next.e - opt.e) + std::abs(next.f - opt.f);
+            opt = next;
+            baIter = iter + 1;
+            if (delta < 1e-7) break;
+        }
+    }
+    std::cout << "Bundle adjustment: " << baIter << " iteration(s)" << std::endl;
+
+    // Fuse collected frames per sequence using the optimized transform, then
+    // decode (with ECC fallback).
     int fusedSeqs = 0, fusedAdds = 0;
     for (int seq = 0; seq < static_cast<int>(fusion.size()); seq++) {
         if (fusion[seq].empty()) continue;
 
-        std::vector<double> sumX(3600, 0), sumY(3600, 0);
-        std::vector<int> cellCount(3600, 0);
+        std::map<int, std::pair<double, double> > cellSum;
+        std::map<int, int> cellCount;
         for (const auto &p: fusion[seq]) {
-            int col = std::clamp(static_cast<int>(std::floor(p.first)), 0, gridCols - 1);
-            int row = std::clamp(static_cast<int>(std::floor(p.second)), 0, gridRows - 1);
+            auto m = opt.map(p.first, p.second);
+            int col = std::clamp(static_cast<int>(std::floor(m.first)),
+                                 0, gridCols - 1);
+            int row = std::clamp(static_cast<int>(std::floor(m.second)),
+                                 0, gridRows - 1);
+            double ex = m.first - (col + 0.5), ey = m.second - (row + 0.5);
+            if (ex * ex + ey * ey > 0.35 * 0.35) continue;
             int idx = row * gridCols + col;
-            sumX[idx] += p.first;
-            sumY[idx] += p.second;
+            cellSum[idx].first += p.first;
+            cellSum[idx].second += p.second;
             cellCount[idx]++;
         }
 
         std::vector<std::pair<double, double> > fused;
-        for (int idx = 0; idx < 3600; idx++) {
-            if (cellCount[idx] == 0) continue;
-            // Require at least 2 votes: single-frame spurious cells (noise or
-            // a particle snapped into a neighbouring cell) are filtered out,
-            // while real particles appear in ~23 of 24 frames.
+        for (const auto &kv: cellSum) {
+            int idx = kv.first;
+            // >= 2 votes filters single-frame spurious cells (noise or a
+            // particle snapped into a neighbour); real particles appear in
+            // ~23 of 24 frames.
             if (cellCount[idx] < 2) continue;
-            fused.emplace_back(sumX[idx] / cellCount[idx],
-                               sumY[idx] / cellCount[idx]);
+            fused.push_back(opt.map(kv.second.first / cellCount[idx],
+                                    kv.second.second / cellCount[idx]));
         }
+        if (fused.empty()) continue;
 
-        // The averaged centroids have much lower noise than any single frame,
-        // so refine the geometry once more on the fused set to eliminate the
-        // systematic cell offsets that made individual frames fail.
         auto fres = codec.decodeCentroidsDetailed(fused);
         if (!fres.ok()) {
-            auto refined = GridCalibrator::calibrate(fused, gridCols, gridRows);
-            if (refined.valid) {
-                GridCalibrator::Affine variants[4] = {
-                    refined, refined.rotated(), refined.rotated().rotated(),
-                    refined.rotated().rotated().rotated()};
-                for (int v = 0; v < 4 && !fres.ok(); v++) {
-                    std::vector<std::pair<double, double> > remapped;
-                    for (const auto &p: fused)
-                        remapped.push_back(variants[v].map(p.first, p.second));
-                    double minX = 1e18, minY = 1e18;
-                    for (const auto &p: remapped) {
-                        minX = std::min(minX, p.first);
-                        minY = std::min(minY, p.second);
+            // CRC-guided bit repair: the fused frame is usually off by only
+            // 1-2 bits, so brute-force flip 1 (then 2) bits until the CRC
+            // passes. A single pass is a few thousand cheap CRC checks.
+            auto repair = [&](const std::vector<uint8_t> &frame)
+                -> std::vector<uint8_t> {
+                if (frame.size() < 5) return {};
+                const size_t nbits = frame.size() * 8;
+                auto flip1 = [&](size_t i) {
+                    std::vector<uint8_t> f = frame;
+                    f[i / 8] ^= static_cast<uint8_t>(1 << (7 - (i % 8)));
+                    return f;
+                };
+                for (size_t i = 0; i < nbits; i++)
+                    if (FrameBuilder::verifyCrc(flip1(i))) return flip1(i);
+                for (size_t i = 0; i < nbits; i++) {
+                    std::vector<uint8_t> f = flip1(i);
+                    for (size_t j = i + 1; j < nbits; j++) {
+                        f[j / 8] ^= static_cast<uint8_t>(1 << (7 - (j % 8)));
+                        if (FrameBuilder::verifyCrc(f)) return f;
+                        f[j / 8] ^= static_cast<uint8_t>(1 << (7 - (j % 8)));
                     }
-                    double sx = std::round(minX - 0.5), sy = std::round(minY - 0.5);
-                    for (auto &p: remapped) {
-                        p.first -= sx;
-                        p.second -= sy;
-                    }
-                    fres = codec.decodeCentroidsDetailed(remapped);
-                    if (fres.ok()) {
+                }
+                return {};
+            };
+
+            auto repaired = repair(codec.decodeCentroidsRaw(fused).value_or(
+                std::vector<uint8_t>()));
+            if (!repaired.empty()) {
+                auto rh = FrameHeader::tryParse(repaired);
+                if (rh) {
+                    std::vector<uint8_t> payload(
+                        repaired.begin() + FrameHeader::totalSize,
+                        repaired.begin() + FrameHeader::totalSize +
+                            rh->payloadLength);
+                    auto added = assembler.addFrameEx(rh->seq, payload);
+                    if (added.ok()) {
+                        fusedSeqs++;
+                        fusedAdds++;
+                        seqSuccess[seq] = fusionFrames[seq];
                         std::cout << "  fuse seq " << seq
-                                  << ": recovered via refined geometry (variant "
-                                  << v << ")\n";
+                                  << ": recovered via CRC-guided bit repair\n";
+                        continue;
                     }
                 }
             }
-        }
-        if (!fres.ok()) {
             // ECC fallback: rebuild the raw frame (sync/length checked, CRC
             // skipped), Hamming-decode the payload, then verify the result
             // against the frame's original CRC field.
@@ -392,7 +486,8 @@ int main(int argc, char *argv[]) {
                 }
             }
             std::cout << "  fuse seq " << seq << ": FAILED ("
-                      << errorName(fres.error().code) << ")\n";
+                      << errorName(fres.error().code) << ", fused cells="
+                      << fused.size() << ")\n";
             continue;
         }
         auto fh = FrameHeader::tryParse(fres.value());
