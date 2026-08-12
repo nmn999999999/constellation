@@ -29,3 +29,6 @@ Thumbs.db
 
 # Local backup archive
 1.zip
+
+# Internal project instructions (contains local machine paths)
+AGENTS.md

@@ -25,7 +25,7 @@ struct Contour {
 // Path existence check that never throws. On Windows the argv / fopen stack
 // works in the ANSI code page (GBK on Chinese systems), so GetFileAttributesA
 // is used instead of std::filesystem::exists, whose narrow->wide conversion
-// throws on non-ASCII paths (e.g. E:\私有粒子\...).
+// throws on non-ASCII paths (e.g. a path containing Chinese characters).
 static bool file_exists(const std::string &path) {
 #ifdef _WIN32
     DWORD attrs = GetFileAttributesA(path.c_str());
