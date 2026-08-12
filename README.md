@@ -87,6 +87,9 @@ seed. There is no key or username: the mapping is fixed and public, so anyone wh
   `ParticleCodec::lastError()`
 - **Fail-fast validation** — invalid grids, >64 KB payloads and out-of-range
   parameters throw descriptive exceptions instead of corrupting data
+- **Geometry calibration** — automatically recovers rotated, zoomed or shifted
+  photographs by fitting an affine transform to the detected particle grid
+  (`GridCalibrator`); the CLI tries it after the axis-aligned methods fail
 
 ## Related Work
 

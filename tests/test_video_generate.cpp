@@ -2,10 +2,11 @@
 // frames, renders each one at several animation times (Perlin drift), and
 // writes an export-style BMP sequence suitable for ffmpeg video composition.
 //
-// Usage: test_video_generate.exe <output_dir> [payload_bytes] [transition_frames]
+// Usage: test_video_generate.exe <output_dir> [payload_bytes] [transition_frames] [ecc]
 //   transition_frames > 0 crossfades between consecutive data frames so the
 //   video flows without hard cuts (transition frames are not decodable by
 //   design; the per-data-frame redundancy still guarantees recovery).
+//   "ecc" enables Hamming (7,4) error correction on the payload.
 #include "particle_codec/codec.h"
 #include <iostream>
 #include <string>
@@ -172,6 +173,7 @@ int main(int argc, char *argv[]) {
     std::string outDir = (argc > 1) ? argv[1] : "build/video_test/anim";
     int payloadBytes = (argc > 2) ? std::atoi(argv[2]) : 1200;
     int transition = (argc > 3) ? std::atoi(argv[3]) : 0;
+    bool eccMode = (argc > 4) && (std::string(argv[4]) == "ecc");
 
     if (payloadBytes <= 0) {
         std::cerr << "Error: payload_bytes must be positive" << std::endl;
@@ -195,6 +197,14 @@ int main(int argc, char *argv[]) {
         }
     }
 
+    // Optionally apply Hamming (7,4) ECC before framing.
+    std::vector<uint8_t> framedData = data;
+    if (eccMode) {
+        framedData = HammingEncoder::encode(data);
+        std::cout << "ECC: Hamming (7,4) enabled, framed payload "
+                  << framedData.size() << " bytes" << std::endl;
+    }
+
     // Keep the same seed/domain the decoder will use.
     std::string domain = "particle_codec";
     auto seed = PseudoRandom::deriveSeed("demo_user", domain);
@@ -202,11 +212,12 @@ int main(int argc, char *argv[]) {
 
     int chunkSize = encoder.maxPayloadBytes();
     std::vector<std::vector<uint8_t> > frameBytesList;
-    for (int offset = 0; offset < static_cast<int>(data.size()); offset += chunkSize) {
-        int end = std::min(offset + chunkSize, static_cast<int>(data.size()));
+    for (int offset = 0; offset < static_cast<int>(framedData.size()); offset += chunkSize) {
+        int end = std::min(offset + chunkSize, static_cast<int>(framedData.size()));
         int seq = static_cast<int>(frameBytesList.size());
         frameBytesList.push_back(FrameBuilder::build(
-            seq, std::vector<uint8_t>(data.begin() + offset, data.begin() + end)));
+            seq, std::vector<uint8_t>(framedData.begin() + offset,
+                                      framedData.begin() + end)));
     }
 
     std::cout << "=== Multi-frame Video Generation ===" << std::endl;

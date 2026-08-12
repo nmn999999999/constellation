@@ -31,6 +31,12 @@ namespace particle_codec {
         Result<std::vector<uint8_t> > decodeCentroidsDetailed(
             const std::vector<std::pair<double, double> > &centroids);
 
+        // Rebuilds frame bytes without CRC verification (sync/length checked).
+        // Lets callers read the sequence number from partially-corrupted
+        // frames, e.g. to fuse multiple video frames of the same data frame.
+        std::optional<std::vector<uint8_t> > decodeCentroidsRaw(
+            const std::vector<std::pair<double, double> > &centroids);
+
         std::optional<std::vector<uint8_t> > decodeCentroids(const std::vector<std::pair<double, double> > &centroids);
 
         std::optional<std::vector<uint8_t> > decodeCentroidsPayload(

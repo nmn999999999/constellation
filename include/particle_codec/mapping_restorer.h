@@ -18,6 +18,13 @@ namespace particle_codec {
         std::optional<std::vector<uint8_t> > restoreFrameEx(
             const std::vector<std::pair<double, double> > &centroids, ErrorInfo &outError);
 
+        // Rebuilds frame bytes and checks sync/length but *skips* the CRC
+        // verification. Used by multi-frame video fusion where a few missing
+        // particles per frame make the CRC fail even though the sequence
+        // number and payload are recoverable.
+        std::optional<std::vector<uint8_t> > restoreFrameRaw(
+            const std::vector<std::pair<double, double> > &centroids);
+
         // Throws std::invalid_argument if count is negative or coords is too short.
         std::optional<std::vector<uint8_t> > restoreFrameFromFloat32(const std::vector<float> &coords, int count);
 

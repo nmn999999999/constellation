@@ -51,6 +51,11 @@ namespace particle_codec {
         return result.takeValue();
     }
 
+    std::optional<std::vector<uint8_t> > ParticleCodec::decodeCentroidsRaw(
+        const std::vector<std::pair<double, double> > &centroids) {
+        return restorer_.restoreFrameRaw(centroids);
+    }
+
     Result<std::vector<uint8_t> > ParticleCodec::decodeCentroidsDetailed(
         const std::vector<std::pair<double, double> > &centroids) {
         ErrorInfo err;

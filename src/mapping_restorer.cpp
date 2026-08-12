@@ -72,6 +72,31 @@ namespace particle_codec {
         return frameBytes;
     }
 
+    std::optional<std::vector<uint8_t> > MappingRestorer::restoreFrameRaw(
+        const std::vector<std::pair<double, double> > &centroids) {
+        if (centroids.empty()) return std::nullopt;
+
+        int byteCount = (grid_.totalCells() + 7) / 8;
+        std::vector<uint8_t> allBytes(byteCount, 0);
+        for (auto [x, y]: centroids) {
+            auto [col, row] = grid_.centerToGrid(x, y);
+            int shuffledIdx = grid_.gridToBitIndex(col, row);
+            if (shuffledIdx >= 0 && shuffledIdx < grid_.totalCells()) {
+                int bitIdx = invPerm_[shuffledIdx];
+                allBytes[bitIdx / 8] |= static_cast<uint8_t>(1 << (7 - (bitIdx % 8)));
+            }
+        }
+
+        if (static_cast<int>(allBytes.size()) < FrameHeader::totalSize) return std::nullopt;
+        auto header = FrameHeader::tryParse(allBytes);
+        if (!header) return std::nullopt;
+
+        int totalLen = FrameHeader::totalSize + header->payloadLength;
+        if (static_cast<int>(allBytes.size()) < totalLen) return std::nullopt;
+
+        return std::vector<uint8_t>(allBytes.begin(), allBytes.begin() + totalLen);
+    }
+
     std::optional<std::vector<uint8_t> > MappingRestorer::restoreFrameFromFloat32(
         const std::vector<float> &coords, int count) {
         if (count < 0) {

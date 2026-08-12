@@ -1,5 +1,6 @@
 #include <particle_codec/codec.h>
 #include <particle_codec/frame_parser.h>
+#include <particle_codec/grid_calibrator.h>
 #include <iostream>
 #include <string>
 #include <vector>
@@ -85,7 +86,7 @@ static std::vector<std::pair<double, double> > contours_to_grid(
 // Diagnostics collected for each detection method so a failed decode can tell
 // the user where it broke (no particles / sync / CRC / ...).
 struct MethodResult {
-    const char *name;
+    std::string name;
     int particles;
     ErrorInfo error;
     bool succeeded;
@@ -95,7 +96,11 @@ struct MethodResult {
 static MethodResult run_method(const char *name,
                                const std::vector<std::pair<double, double> > &gridPoints,
                                int gridCols, int gridRows) {
-    MethodResult r{name, static_cast<int>(gridPoints.size()), ErrorInfo{}, false, {}};
+    MethodResult r;
+    r.name = name;
+    r.particles = static_cast<int>(gridPoints.size());
+    r.error = ErrorInfo{};
+    r.succeeded = false;
     ParticleCodec codec("particle_codec", gridCols, gridRows);
     auto result = codec.decodeCentroidsDetailed(gridPoints);
     if (!result.ok()) {
@@ -113,6 +118,46 @@ static MethodResult run_method(const char *name,
         result.value().begin() + FrameHeader::totalSize,
         result.value().begin() + FrameHeader::totalSize + header->payloadLength);
     return r;
+}
+
+// Compose a small rotation/scale/translation perturbation onto a calibrated
+// affine map (applied in canonical grid space).
+static GridCalibrator::Affine perturbAffine(const GridCalibrator::Affine &t,
+                                            double dthDeg, double ds,
+                                            double dtx, double dty) {
+    double r = dthDeg * 3.14159265358979323846 / 180.0;
+    double cs = std::cos(r), sn = std::sin(r);
+    GridCalibrator::Affine p;
+    p.a = ds * (cs * t.a - sn * t.d);
+    p.b = ds * (cs * t.b - sn * t.e);
+    p.c = ds * (cs * t.c - sn * t.f) + dtx;
+    p.d = ds * (sn * t.a + cs * t.d);
+    p.e = ds * (sn * t.b + cs * t.e);
+    p.f = ds * (sn * t.c + cs * t.f) + dty;
+    p.valid = true;
+    return p;
+}
+
+// Map centroids through an affine map and re-align the translation so the
+// result sits in [0, gridSize).
+static std::vector<std::pair<double, double> > map_and_align(
+    const GridCalibrator::Affine &t,
+    const std::vector<std::pair<double, double> > &centroids) {
+    std::vector<std::pair<double, double> > mapped;
+    mapped.reserve(centroids.size());
+    for (const auto &c: centroids)
+        mapped.push_back(t.map(c.first, c.second));
+    double minX = 1e18, minY = 1e18;
+    for (const auto &p: mapped) {
+        minX = std::min(minX, p.first);
+        minY = std::min(minY, p.second);
+    }
+    double sx = std::round(minX - 0.5), sy = std::round(minY - 0.5);
+    for (auto &p: mapped) {
+        p.first -= sx;
+        p.second -= sy;
+    }
+    return mapped;
 }
 
 // Distance transform. Uses a float buffer (4 bytes/pixel) instead of double.
@@ -313,11 +358,12 @@ int main(int argc, char *argv[]) {
                      "and cannot be decoded\n";
     };
 
+    std::vector<Contour> colorContours;
     try {
         // Method 1: Color flood-fill (runs on a copy so the mask stays intact for DT)
         {
             std::vector<uint8_t> maskCopy = mask;
-            auto colorContours = detect_by_color(maskCopy, width, height);
+            colorContours = detect_by_color(maskCopy, width, height);
             methods.push_back(run_method(
                 "color flood-fill (centered)",
                 contours_to_grid(colorContours, gridCols, gridRows, width, height),
@@ -358,6 +404,60 @@ int main(int argc, char *argv[]) {
         if (methods.back().succeeded) {
             std::cout << methods.back().payload << std::flush;
             return 0;
+        }
+
+        // Method 5: geometry calibration — the 4 methods above assume an
+        // axis-aligned, full-frame grid. If the image is a photograph (rotated,
+        // zoomed or shifted), recover the affine transform from the detected
+        // centroids and try all four orientation variants.
+        if (colorContours.size() >= 16) {
+            std::vector<std::pair<double, double> > centroids;
+            for (const auto &c: colorContours) centroids.emplace_back(c.cx, c.cy);
+
+            auto cal = GridCalibrator::calibrate(centroids, gridCols, gridRows);
+            if (cal.valid) {
+                GridCalibrator::Affine variants[4] = {
+                    cal, cal.rotated(), cal.rotated().rotated(),
+                    cal.rotated().rotated().rotated()};
+                for (int v = 0; v < 4; v++) {
+                    char label[64];
+                    std::snprintf(label, sizeof(label),
+                                  "calibrated (orientation %d)", v);
+                    auto r = run_method(label,
+                                        map_and_align(variants[v], centroids),
+                                        gridCols, gridRows);
+                    methods.push_back(r);
+                    if (r.succeeded) {
+                        std::cout << r.payload << std::flush;
+                        return 0;
+                    }
+
+                    // CrcMismatch means the sync word is right but a few cells
+                    // are off: micro-refine the transform around this variant
+                    // using decode success as the objective.
+                    if (r.error.code == ErrorCode::CrcMismatch) {
+                        for (double dth: {-0.15, 0.0, 0.15})
+                            for (double dss: {-0.02, 0.0, 0.02})
+                                for (double dtx: {-0.08, 0.0, 0.08})
+                                    for (double dty: {-0.08, 0.0, 0.08}) {
+                                        if (dth == 0 && dss == 0 && dtx == 0 &&
+                                            dty == 0)
+                                            continue;
+                                        auto pt = perturbAffine(
+                                            variants[v], dth, dss, dtx, dty);
+                                        auto r2 = run_method(
+                                            "calibrated+refined",
+                                            map_and_align(pt, centroids),
+                                            gridCols, gridRows);
+                                        if (r2.succeeded) {
+                                            std::cout << r2.payload
+                                                      << std::flush;
+                                            return 0;
+                                        }
+                                    }
+                    }
+                }
+            }
         }
     } catch (const std::exception &e) {
         std::cerr << "Internal error: " << e.what() << std::endl;
