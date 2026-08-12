@@ -36,6 +36,8 @@ train/*.onnx
 train/*.onnx.data
 train/*.npy
 train/coords.txt
+checkpoint_last.pt
+/coords.txt
 __pycache__/
 *.pyc
 
