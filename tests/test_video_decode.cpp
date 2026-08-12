@@ -140,14 +140,15 @@ int main(int argc, char *argv[]) {
         auto result = codec.decodeCentroidsDetailed(gp);
         if (!result.ok()) {
             failFrames++;
-            failByStage.push_back(errorName(result.error().code));
+            failByStage.push_back("f" + std::to_string(fi) + ":" +
+                                  errorName(result.error().code));
             continue;
         }
 
         auto header = FrameHeader::tryParse(result.value());
         if (!header) {
             failFrames++;
-            failByStage.push_back("no-header");
+            failByStage.push_back("f" + std::to_string(fi) + ":no-header");
             continue;
         }
 
@@ -176,10 +177,11 @@ int main(int argc, char *argv[]) {
     }
     if (failFrames > 0) {
         std::cout << "Failed frames: " << failFrames << std::endl;
-        std::cout << "  (first failures: ";
-        for (size_t i = 0; i < 6 && i < failByStage.size(); i++)
+        std::cout << "  failures: ";
+        for (size_t i = 0; i < failByStage.size() && i < 40; i++)
             std::cout << failByStage[i] << " ";
-        std::cout << "...)" << std::endl;
+        if (failByStage.size() > 40) std::cout << "...";
+        std::cout << std::endl;
     }
 
     auto assembled = assembler.extractAll();
