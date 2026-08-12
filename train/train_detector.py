@@ -185,11 +185,35 @@ def bit_accuracy(model, loader, device):
     return correct / max(total, 1)
 
 
+def load_or_build_dataset(codec, cache_x, cache_y, shape_x, shape_y, n, seed):
+    """Load the cached dataset, rebuilding once if missing/truncated/shape
+    mismatch (a killed session can leave partial files)."""
+    if os.path.exists(cache_x) and os.path.exists(cache_y):
+        try:
+            x = np.load(cache_x)
+            y = np.load(cache_y)
+            if x.shape == shape_x and y.shape == shape_y:
+                print("loading cached dataset")
+                return x, y
+            print("cache shape mismatch, rebuilding")
+        except Exception:
+            print("cache unreadable, rebuilding")
+    print("building dataset (may take ~10 min)...")
+    x, y, _ = build_dataset(codec, n, seed)
+    x = x.numpy()
+    y = y.numpy()
+    for path, arr in ((cache_x, x), (cache_y, y)):
+        np.save(path + ".tmp", arr)
+        os.replace(path + ".tmp", path)
+    print("cached dataset to", cache_x)
+    return x, y
+
+
 def main():
     ap = argparse.ArgumentParser()
     ap.add_argument("--epochs", type=int, default=30)
-    ap.add_argument("--train-size", type=int, default=8000)
-    ap.add_argument("--val-size", type=int, default=1000)
+    ap.add_argument("--train-size", type=int, default=3000)
+    ap.add_argument("--val-size", type=int, default=500)
     ap.add_argument("--batch-size", type=int, default=64)
     ap.add_argument("--lr", type=float, default=2e-3)
     ap.add_argument("--out", default="particle_detector.pt")
@@ -206,15 +230,12 @@ def main():
     codec = ParticleCodecPy()
     cache_x = args.out + ".train_x.npy"
     cache_y = args.out + ".train_y.npy"
-    if os.path.exists(cache_x):
-        print("loading cached dataset from", cache_x)
-        train_x = torch.from_numpy(np.load(cache_x))
-        train_y = torch.from_numpy(np.load(cache_y))
-    else:
-        train_x, train_y, _ = build_dataset(codec, args.train_size, seed=1)
-        np.save(cache_x, train_x.numpy())
-        np.save(cache_y, train_y.numpy())
-        print("cached dataset to", cache_x)
+    shape_x = (args.train_size, 3, IMG_SIZE, IMG_SIZE)
+    shape_y = (args.train_size, ROWS, COLS)
+    train_x, train_y = load_or_build_dataset(
+        codec, cache_x, cache_y, shape_x, shape_y, args.train_size, seed=1)
+    train_x = torch.from_numpy(train_x)
+    train_y = torch.from_numpy(train_y)
     val_x, val_y, _ = build_dataset(codec, args.val_size, seed=2)
 
     train_ds = torch.utils.data.TensorDataset(train_x, train_y)
