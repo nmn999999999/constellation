@@ -203,8 +203,10 @@ def load_or_build_dataset(codec, cache_x, cache_y, shape_x, shape_y, n, seed):
     x = x.numpy()
     y = y.numpy()
     for path, arr in ((cache_x, x), (cache_y, y)):
-        np.save(path + ".tmp", arr)
-        os.replace(path + ".tmp", path)
+        # np.save appends .npy unless the name already ends with it
+        tmp = path + ".tmp.npy"
+        np.save(tmp, arr)
+        os.replace(tmp, path)
     print("cached dataset to", cache_x)
     return x, y
 
@@ -295,9 +297,8 @@ def main():
     dummy = torch.randn(1, 3, IMG_SIZE, IMG_SIZE)
     try:
         torch.onnx.export(
-            model, dummy, args.onnx, opset_version=12,
-            input_names=["img"], output_names=["logits"],
-            dynamic_axes={"img": {0: "batch"}, "logits": {0: "batch"}})
+            model, dummy, args.onnx, opset_version=13,
+            input_names=["img"], output_names=["logits"], dynamo=False)
         print("exported", args.onnx)
     except Exception as e:  # pragma: no cover
         print("onnx export failed:", e)
