@@ -1,0 +1,31 @@
+﻿# Build output
+build/
+
+# IDE
+.idea/
+.vscode/
+*.iml
+*.swp
+
+# OS
+.DS_Store
+Thumbs.db
+
+# Windows
+*.user
+*.suo
+*.sln
+
+# C++
+*.obj
+*.exe
+*.lib
+*.pdb
+*.ilk
+*.exp
+
+# Generated test images
+*.bmp
+
+# Local backup archive
+1.zip
