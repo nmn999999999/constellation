@@ -1,4 +1,4 @@
-# Constellation ML training (Kaggle)
+# Constellation ML training
 
 Train a spatial-transformer CNN that decodes particle fields directly from
 photographed images (rotated / zoomed / shifted), replacing the hand-written
@@ -6,7 +6,7 @@ detection + geometry-calibration pipeline with a learned equivalent.
 
 ## What the model does
 
-Input: a 240x240 image of a particle field, arbitrarily transformed.
+Input: a 240x240 photo of a particle field, arbitrarily transformed.
 Output: the canonical 60x60 grid bitmap (which cell has a particle).
 
 The localization subnet predicts the affine transform that rectifies the
@@ -16,10 +16,56 @@ encoder (`particle_codec_py.py`), which is verified byte-for-byte against the
 C++ library (see `consistency_check.py`), so whatever the model learns decodes
 with the real codec.
 
-## Run on Kaggle
+## Recipe (v2, 2026-08-12)
 
-1. Create a Notebook at kaggle.com (GPU accelerator: T4 x2 / P100).
-2. In the first cell:
+- Canonical 480x480 renders are cached once; every batch is warped on-the-fly
+  on the GPU (rotation +-3 deg, zoom 0.85-1.15, shift +-12 px, noise,
+  brightness), so each epoch sees fresh geometry.
+- The STN localization head is **directly supervised**: it predicts the
+  generative parameters (angle, log_scale, tx, ty) that undo the warp, with
+  MSE against the true augmentation parameters on top of the detection BCE.
+  Parametrizing instead of regressing raw matrix entries is essential
+  (without direct supervision it never learned: 78.8% bit-acc / 0% decode
+  after 10 epochs).
+- **Teacher-forcing warmup**: the first `--warmup-steps` optimizer steps
+  rectify with the TRUE affine, so the detection head learns on canonical
+  images (98.7% bit-acc on unseen frames after only 150 training images)
+  while the loc head learns the affine from its MSE alone. Joint training
+  starts once both heads are sensible.
+- Curriculum: first 5 epochs use only +-1 deg / +-3% zoom / +-4 px, then the
+  full range (controlled by `--curriculum-epochs`).
+- `--affine-w` weights the affine MSE (default 10.0).
+
+## Run on Lightning AI (recommended, free)
+
+1. Go to <https://lightning.ai/sign-up> and register with any email. The free
+   plan does not need a credit card. Free monthly credits pay for GPU hours;
+   an `.edu` / company email usually verifies instantly.
+2. Create a Studio (blank), then upload these two files from `train/`:
+   `train_detector.py` and `particle_codec_py.py` (drag & drop into the file
+   panel, or use the terminal).
+3. Open the Studio terminal and install deps:
+
+   ```bash
+   pip install torch numpy pillow
+   ```
+
+4. Start a GPU machine (menu on the right / top), then run:
+
+   ```bash
+   python train_detector.py --epochs 40 --train-size 8000 --val-size 1000 --batch-size 64
+   ```
+
+   First run builds + caches the dataset (~10-15 min), then trains on GPU.
+   A checkpoint is saved every epoch (`checkpoint_last.pt`); if the session
+   drops, rerun with `--resume`.
+5. Download `particle_detector.pt` (weights) and `particle_detector.onnx`
+   (inference model) when done.
+
+## Run on Kaggle (alternative)
+
+1. Create a Notebook (GPU accelerator: T4 x2 / P100).
+2. First cell:
 
    ```python
    !git clone https://github.com/nmn999999999/constellation.git
@@ -32,18 +78,13 @@ with the real codec.
    !python train_detector.py --epochs 40 --train-size 8000 --val-size 1000 --batch-size 64
    ```
 
-   - First run generates and caches the dataset (~10-15 min on CPU workers);
-     later runs load the cache instantly.
-   - A checkpoint is saved every epoch (`checkpoint_last.pt`), so if the
-     session disconnects, rerun with `--resume` to continue.
-
-4. Results: `particle_detector.pt` + `particle_detector.onnx`. Download them
-   from the Notebook output panel.
+   The code writes caches to `/kaggle/working` (writable), not `/kaggle/input`.
 
 ## Expected behavior
 
-- `bit-acc` (per-cell accuracy) should climb steadily; `decode` (full-frame
-  CRC success) starts at 0% and only turns on once the geometry is learned.
+- `bce` (detection loss) and `affine` (STN geometry MSE) should both drop.
+- `bit-acc` (per-cell accuracy) climbs steadily; `decode` (full-frame CRC
+  success) starts at 0% and turns on once geometry is learned.
 - With 8000 samples and 40 epochs the decode rate should reach >90% on the
   validation set, including rotated / zoomed inputs.
 
