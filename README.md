@@ -83,6 +83,27 @@ seed. There is no key or username: the mapping is fixed and public, so anyone wh
 - **60×60 grid default** — ~438 bytes payload per frame (adjustable)
 - **Win32 GUI viewer** — Real-time particle animation window (ESC to close)
 
+## Related Work
+
+Constellation belongs to the "dot-pattern" family of visual data encoding, but as of 2026 it has few direct
+counterparts on GitHub:
+
+- **Matrix codes (QR, Data Matrix, Aztec)** — the closest mainstream relative: data is encoded by the presence or
+  absence of cells on a fixed grid and decoded deterministically. Unlike Constellation they are explicit,
+  machine-readable barcodes rather than a concealable visual medium.
+- **Dot-pattern steganography research (DPCES)** — academic schemes map characters to randomized dot patterns
+  (e.g. *A Randomized Dot Pattern Character Encoding Scheme*, 2023). Conceptually adjacent, but they operate as
+  character-substitution tables without frame structure, CRC verification, or image-based blob decoding.
+- **Point-cloud / 3D steganography** (e.g. [GS-Hider](https://github.com/xuanyuzhang21/GS-Hider), NeurIPS 2024) —
+  hides messages in 3D Gaussian-splatting point clouds, sharing the "data lives in point positions" idea in a 3D
+  domain.
+- **Mainstream image steganography** ([OpenStego](https://github.com/syvaidya/openstego), StegHide, LSB tools,
+  [StegaStamp](https://github.com/tancik/StegaStamp)) — alter pixel values or learn a robust encoding; the carrier is
+  a natural image rather than an aesthetic particle field.
+
+What distinguishes Constellation: the carrier *is* the message — a deterministic, key-free particle field that anyone
+can decode from the image alone, with CRC32 frame verification and optional Hamming error correction.
+
 ## Building & Running
 
 ### CMake (all platforms)
