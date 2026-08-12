@@ -30,5 +30,11 @@ Thumbs.db
 # Local backup archive
 1.zip
 
+# ML training artifacts
+train/*.pt
+train/*.onnx
+train/*.npy
+train/coords.txt
+
 # Internal project instructions (contains local machine paths)
 AGENTS.md
