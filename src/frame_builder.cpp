@@ -1,5 +1,7 @@
 ﻿#include "particle_codec/frame_builder.h"
 #include <cstring>
+#include <string>
+#include <stdexcept>
 
 namespace particle_codec {
     uint32_t CRC32::table_[256];
@@ -78,10 +80,22 @@ namespace particle_codec {
 
     // FrameBuilder
     int FrameBuilder::maxPayloadBytes(int gridCells) {
-        return (gridCells - FrameHeader::totalSize * 8) / 8;
+        int payload = (gridCells - FrameHeader::totalSize * 8) / 8;
+        return payload > 0 ? payload : 0;
     }
 
+    // Throws std::length_error if the payload cannot fit in the 16-bit length
+    // field, and std::invalid_argument for out-of-range sequence numbers.
     std::vector<uint8_t> FrameBuilder::build(int seq, const std::vector<uint8_t> &payload) {
+        if (payload.size() > 0xFFFF) {
+            throw std::length_error(
+                "FrameBuilder::build: payload of " + std::to_string(payload.size()) +
+                " bytes exceeds the 16-bit frame length field (65535)");
+        }
+        if (seq < 0 || seq > 0xFFFF) {
+            throw std::invalid_argument(
+                "FrameBuilder::build: seq must be in [0, 65535], got " + std::to_string(seq));
+        }
         FrameHeader header(seq, static_cast<int>(payload.size()));
         auto headerBytes = header.toBytes();
 

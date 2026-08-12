@@ -1,6 +1,8 @@
 ﻿#include "particle_codec/coordinate_encoder.h"
 #include <algorithm>
 #include <cmath>
+#include <stdexcept>
+#include <string>
 
 namespace particle_codec {
     CoordinateEncoder::CoordinateEncoder(const std::vector<uint8_t> &seed, int gridCols, int gridRows,
@@ -23,6 +25,11 @@ namespace particle_codec {
     std::vector<EncodedFrame> CoordinateEncoder::encodeData(const std::vector<uint8_t> &data) {
         std::vector<EncodedFrame> frames;
         int chunkSize = maxPayloadBytes();
+        if (chunkSize <= 0) {
+            throw std::length_error(
+                "CoordinateEncoder::encodeData: grid " + std::to_string(gridCols_) + "x" +
+                std::to_string(gridRows_) + " is too small to hold any frame payload");
+        }
 
         for (int offset = 0; offset < static_cast<int>(data.size()); offset += chunkSize) {
             int end = std::min(offset + chunkSize, static_cast<int>(data.size()));
@@ -78,6 +85,12 @@ namespace particle_codec {
 
     std::vector<uint8_t> CoordinateEncoder::decodeParticles(
         const std::vector<std::pair<double, double> > &particles, int expectedFrameLength) {
+        if (expectedFrameLength < 0 || expectedFrameLength > (grid_.totalCells() + 7) / 8) {
+            throw std::invalid_argument(
+                "CoordinateEncoder::decodeParticles: expectedFrameLength must be in [0, " +
+                std::to_string((grid_.totalCells() + 7) / 8) + "], got " +
+                std::to_string(expectedFrameLength));
+        }
         // Write recovered bits straight into bytes (N bits -> N/8 bytes),
         // avoiding a full per-bit array.
         int byteCount = (grid_.totalCells() + 7) / 8;
@@ -99,6 +112,18 @@ namespace particle_codec {
 
     std::optional<std::vector<uint8_t> > CoordinateEncoder::tryDecodeFrame(
         const std::vector<std::pair<double, double> > &particles) {
+        ErrorInfo ignored;
+        return tryDecodeFrameEx(particles, ignored);
+    }
+
+    std::optional<std::vector<uint8_t> > CoordinateEncoder::tryDecodeFrameEx(
+        const std::vector<std::pair<double, double> > &particles, ErrorInfo &outError) {
+        outError = ErrorInfo{};
+        if (particles.empty()) {
+            outError = makeError(ErrorCode::NoParticles, "no particles supplied for decode");
+            return std::nullopt;
+        }
+
         int byteCount = (grid_.totalCells() + 7) / 8;
         std::vector<uint8_t> allBytes(byteCount, 0);
         for (auto [x, y]: particles) {
@@ -110,16 +135,38 @@ namespace particle_codec {
             }
         }
 
-        if (static_cast<int>(allBytes.size()) < FrameHeader::totalSize) return std::nullopt;
+        if (static_cast<int>(allBytes.size()) < FrameHeader::totalSize) {
+            outError = makeError(
+                ErrorCode::FrameTooShort,
+                "grid capacity (" + std::to_string(allBytes.size()) +
+                " bytes) is smaller than a frame header (" +
+                std::to_string(FrameHeader::totalSize) + " bytes)");
+            return std::nullopt;
+        }
 
         auto header = FrameHeader::tryParse(allBytes);
-        if (!header) return std::nullopt;
+        if (!header) {
+            outError = makeError(ErrorCode::SyncNotFound,
+                                 "0xAA55AA55 sync word not found in recovered bits");
+            return std::nullopt;
+        }
 
         int totalLen = FrameHeader::totalSize + header->payloadLength;
-        if (static_cast<int>(allBytes.size()) < totalLen) return std::nullopt;
+        if (static_cast<int>(allBytes.size()) < totalLen) {
+            outError = makeError(
+                ErrorCode::PayloadTooLong,
+                "frame declares " + std::to_string(header->payloadLength) +
+                " payload bytes but the grid only holds " +
+                std::to_string(static_cast<int>(allBytes.size()) - FrameHeader::totalSize));
+            return std::nullopt;
+        }
 
         std::vector<uint8_t> frameBytes(allBytes.begin(), allBytes.begin() + totalLen);
-        if (!FrameBuilder::verifyCrc(frameBytes)) return std::nullopt;
+        if (!FrameBuilder::verifyCrc(frameBytes)) {
+            outError = makeError(ErrorCode::CrcMismatch,
+                                 "CRC32 verification failed for recovered frame");
+            return std::nullopt;
+        }
 
         return frameBytes;
     }

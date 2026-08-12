@@ -2,6 +2,7 @@
 #include <cstdint>
 #include <vector>
 #include <optional>
+#include "error.h"
 #include "frame_builder.h"
 #include <unordered_map>
 
@@ -38,9 +39,14 @@ namespace particle_codec {
 
     class FrameAssembler {
     public:
+        // Throws std::invalid_argument unless maxBufferSize >= 1.
         explicit FrameAssembler(int maxBufferSize = 256);
 
+        // Convenience wrapper; use addFrameEx for failure reasons.
         bool addFrame(int seq, const std::vector<uint8_t> &payload);
+
+        // Error-safe variant: reports FrameDuplicate / BufferOverflow.
+        Result<void> addFrameEx(int seq, const std::vector<uint8_t> &payload);
 
         bool hasCompleteData() const;
 
@@ -66,4 +72,3 @@ namespace particle_codec {
         bool started_ = false;
     };
 } // namespace particle_codec
-

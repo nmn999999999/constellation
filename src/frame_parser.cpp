@@ -1,5 +1,7 @@
 ﻿#include "particle_codec/frame_parser.h"
 #include <algorithm>
+#include <stdexcept>
+#include <string>
 #include <unordered_map>
 
 namespace particle_codec {
@@ -98,17 +100,35 @@ namespace particle_codec {
 
     // FrameAssembler
     FrameAssembler::FrameAssembler(int maxBufferSize) : maxBufferSize_(maxBufferSize) {
+        if (maxBufferSize < 1) {
+            throw std::invalid_argument(
+                "FrameAssembler: maxBufferSize must be >= 1, got " +
+                std::to_string(maxBufferSize));
+        }
     }
 
     bool FrameAssembler::addFrame(int seq, const std::vector<uint8_t> &payload) {
-        if (buffer_.count(seq)) return false;
-        if (static_cast<int>(buffer_.size()) >= maxBufferSize_) return false;
+        return addFrameEx(seq, payload).ok();
+    }
+
+    Result<void> FrameAssembler::addFrameEx(int seq, const std::vector<uint8_t> &payload) {
+        if (buffer_.count(seq)) {
+            return Result<void>::failure(makeError(
+                ErrorCode::FrameDuplicate,
+                "FrameAssembler: sequence " + std::to_string(seq) + " is already buffered"));
+        }
+        if (static_cast<int>(buffer_.size()) >= maxBufferSize_) {
+            return Result<void>::failure(makeError(
+                ErrorCode::BufferOverflow,
+                "FrameAssembler: buffer limit of " + std::to_string(maxBufferSize_) +
+                " frames reached"));
+        }
         buffer_[seq] = payload;
         if (!started_ || seq < nextSeq_) {
             nextSeq_ = seq;
             started_ = true;
         }
-        return true;
+        return Result<void>::success();
     }
 
     bool FrameAssembler::hasCompleteData() const {

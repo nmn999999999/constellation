@@ -82,6 +82,11 @@ seed. There is no key or username: the mapping is fixed and public, so anyone wh
 - **Image-based decoding** — Detects particles from RGB/RGBA/grayscale images
 - **60×60 grid default** — ~438 bytes payload per frame (adjustable)
 - **Win32 GUI viewer** — Real-time particle animation window (ESC to close)
+- **Structured error feedback** — Result<T>/ErrorInfo pinpoint the failure stage
+  (no particles / sync / CRC / payload too long); legacy APIs expose it via
+  `ParticleCodec::lastError()`
+- **Fail-fast validation** — invalid grids, >64 KB payloads and out-of-range
+  parameters throw descriptive exceptions instead of corrupting data
 
 ## Related Work
 
@@ -103,6 +108,24 @@ counterparts on GitHub:
 
 What distinguishes Constellation: the carrier *is* the message — a deterministic, key-free particle field that anyone
 can decode from the image alone, with CRC32 frame verification and optional Hamming error correction.
+
+## Error Handling
+
+Data-dependent failures are reported through `particle_codec::Result<T>` /
+`ErrorInfo` with a stage-specific code (`NoParticles`, `SyncNotFound`,
+`PayloadTooLong`, `CrcMismatch`, `FrameDuplicate`, `BufferOverflow`, ...). The
+legacy `std::optional`-returning APIs keep their signatures and expose the
+reason via `ParticleCodec::lastError()`.
+
+Programmer errors fail fast with descriptive exceptions: invalid grid
+dimensions (`std::invalid_argument`), payloads larger than the 16-bit frame
+length field (`std::length_error`), and out-of-range byte/chunk parameters
+(`std::out_of_range`).
+
+The `decode_image` CLI prints per-method diagnostics on failure (particle
+counts and the stage where each method broke) and uses distinct exit codes:
+`0` decoded, `1` usage/argument error, `2` I/O error, `3` decode failed,
+`4` internal error.
 
 ## Building & Running
 

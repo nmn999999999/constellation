@@ -15,6 +15,7 @@
 │
 ├── include/particle_codec/        # 公共头文件
 │   ├── codec.h                    # ParticleCodec 主类
+│   ├── error.h                    # ErrorCode/ErrorInfo/Result<T> 错误反馈
 │   ├── frame_builder.h            # FrameHeader(syncWord=0xAA55AA55, totalSize=12), CRC32, FrameBuilder
 │   ├── coordinate_encoder.h       # 坐标编码器
 │   ├── mapping_restorer.h         # 解码恢复器
@@ -25,6 +26,7 @@
 │   └── frame_parser.h             # 帧解析器
 ├── src/                           # C++ 实现
 │   ├── codec.cpp                  # 主类实现
+│   ├── error.cpp                  # errorName() 实现
 │   └── ...其他 .cpp
 ├── demo/
 │   ├── viewer.cpp                 # Win32 粒子查看器（导出：480×480，scale=8，pr=2，gr=4）
@@ -32,6 +34,7 @@
 │   └── stb_image.h                # stb_image v2.30（PNG/JPG/BMP 加载）
 ├── tests/
 │   ├── codec_test.cpp             # 15+ 单元测试
+│   ├── test_error_safety.cpp      # 错误安全与错误反馈测试（非法参数/损坏帧诊断）
 │   ├── test_decode_image.cpp      # 端到端编解码测试
 │   ├── test_viewer_decode.cpp     # viewer 风格编解码测试（104/104 粒子）
 │   └── test_viewer_export.cpp     # export 风格编解码测试（128/128 粒子）
@@ -77,6 +80,7 @@ cmake --build build
 
 ```bash
 build\codec_test.exe          # 15/15 核心测试
+build\error_safety_test.exe   # 错误安全/错误反馈测试
 build\test_decode_image.exe   # 小 blob 端到端测试
 build\test_viewer_decode.exe  # 104/104 粒子 viewer 测试
 build\test_viewer_export.exe  # 生成 480×480 export 测试图

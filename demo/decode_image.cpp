@@ -82,20 +82,37 @@ static std::vector<std::pair<double, double> > contours_to_grid(
     return gridPoints;
 }
 
-static std::optional<std::string> try_decode(
-    const std::vector<std::pair<double, double> > &gridPoints,
-    int gridCols, int gridRows) {
+// Diagnostics collected for each detection method so a failed decode can tell
+// the user where it broke (no particles / sync / CRC / ...).
+struct MethodResult {
+    const char *name;
+    int particles;
+    ErrorInfo error;
+    bool succeeded;
+    std::string payload;
+};
+
+static MethodResult run_method(const char *name,
+                               const std::vector<std::pair<double, double> > &gridPoints,
+                               int gridCols, int gridRows) {
+    MethodResult r{name, static_cast<int>(gridPoints.size()), ErrorInfo{}, false, {}};
     ParticleCodec codec("particle_codec", gridCols, gridRows);
-    auto frameBytes = codec.decodeCentroids(gridPoints);
-    if (frameBytes.has_value() && !frameBytes->empty()) {
-        auto header = FrameHeader::tryParse(*frameBytes);
-        if (header && header->payloadLength > 0) {
-            return std::string(
-                frameBytes->begin() + FrameHeader::totalSize,
-                frameBytes->begin() + FrameHeader::totalSize + header->payloadLength);
-        }
+    auto result = codec.decodeCentroidsDetailed(gridPoints);
+    if (!result.ok()) {
+        r.error = result.error();
+        return r;
     }
-    return std::nullopt;
+    auto header = FrameHeader::tryParse(result.value());
+    if (!header || header->payloadLength <= 0) {
+        r.error = makeError(ErrorCode::DecodeFailed,
+                            "frame parsed but contains no payload");
+        return r;
+    }
+    r.succeeded = true;
+    r.payload.assign(
+        result.value().begin() + FrameHeader::totalSize,
+        result.value().begin() + FrameHeader::totalSize + header->payloadLength);
+    return r;
 }
 
 // Distance transform. Uses a float buffer (4 bytes/pixel) instead of double.
@@ -223,7 +240,9 @@ static std::vector<Contour> detect_by_color(std::vector<uint8_t> &mask, int w, i
 
 int main(int argc, char *argv[]) {
     if (argc < 2) {
-        std::cerr << "Usage: decode_image <image_path> [grid_cols] [grid_rows]" << std::endl;
+        std::cerr << "Usage: decode_image <image_path> [grid_cols] [grid_rows]\n"
+                  << "Exit codes: 0=decoded, 1=usage/argument error, 2=I/O error, "
+                     "3=decode failed, 4=internal error" << std::endl;
         return 1;
     }
 
@@ -231,8 +250,12 @@ int main(int argc, char *argv[]) {
     int gridCols = (argc > 2) ? std::atoi(argv[2]) : 60;
     int gridRows = (argc > 3) ? std::atoi(argv[3]) : 60;
 
-    if (gridCols <= 0 || gridRows <= 0) {
-        std::cerr << "Error: grid_cols/grid_rows must be positive integers" << std::endl;
+    if (gridCols < 1 || gridRows < 1 ||
+        gridCols * gridRows < FrameHeader::totalSize * 8) {
+        std::cerr << "Error: grid must be positive with at least "
+                  << FrameHeader::totalSize * 8
+                  << " cells (grid_cols * grid_rows); got "
+                  << gridCols << "x" << gridRows << std::endl;
         return 1;
     }
 
@@ -250,61 +273,12 @@ int main(int argc, char *argv[]) {
 
     int maxCount = gridCols * gridRows;
 
-    // Method 1: Color flood-fill (runs on a copy so the mask stays intact for DT)
-    {
-        std::vector<uint8_t> maskCopy = mask;
-        auto colorContours = detect_by_color(maskCopy, width, height);
-        auto gp1 = contours_to_grid(colorContours, gridCols, gridRows, width, height);
-        auto r1 = try_decode(gp1, gridCols, gridRows);
-        if (r1) {
-            std::cout << *r1 << std::flush;
-            return 0;
-        }
-
-        // Method 4: Color + direct scale
-        {
-            double scaleX = static_cast<double>(width) / gridCols;
-            double scaleY = static_cast<double>(height) / gridRows;
-            std::vector<std::pair<double, double> > gp4;
-            std::vector<bool> cellUsed(maxCount, false);
-            for (auto &c: colorContours) {
-                double gx = c.cx / scaleX;
-                double gy = c.cy / scaleY;
-                int col = std::clamp(static_cast<int>(std::floor(gx)), 0, gridCols - 1);
-                int row = std::clamp(static_cast<int>(std::floor(gy)), 0, gridRows - 1);
-                int idx = row * gridCols + col;
-                if (!cellUsed[idx]) {
-                    cellUsed[idx] = true;
-                    gp4.emplace_back(col + 0.5, row + 0.5);
-                }
-            }
-            auto r4 = try_decode(gp4, gridCols, gridRows);
-            if (r4) {
-                std::cout << *r4 << std::flush;
-                return 0;
-            }
-        }
-    }
-
-    // Method 2: Distance transform
-    auto dtContours = detect_by_distance_transform(mask, width, height, gridCols, gridRows);
-    auto gp2 = contours_to_grid(dtContours, gridCols, gridRows, width, height);
-    auto r2 = try_decode(gp2, gridCols, gridRows);
-    if (r2) {
-        std::cout << *r2 << std::flush;
-        return 0;
-    }
-
-    // Mask is no longer needed; release it before the last method.
-    std::vector<uint8_t>().swap(mask);
-
-    // Method 3: Direct grid-snapping without centering offset (for export images)
-    {
+    auto direct_grid = [&](const std::vector<Contour> &contours) {
         double scaleX = static_cast<double>(width) / gridCols;
         double scaleY = static_cast<double>(height) / gridRows;
-        std::vector<std::pair<double, double> > gp3;
+        std::vector<std::pair<double, double> > gp;
         std::vector<bool> cellUsed(maxCount, false);
-        for (auto &c: dtContours) {
+        for (auto &c: contours) {
             double gx = c.cx / scaleX;
             double gy = c.cy / scaleY;
             int col = std::clamp(static_cast<int>(std::floor(gx)), 0, gridCols - 1);
@@ -312,16 +286,84 @@ int main(int argc, char *argv[]) {
             int idx = row * gridCols + col;
             if (!cellUsed[idx]) {
                 cellUsed[idx] = true;
-                gp3.emplace_back(col + 0.5, row + 0.5);
+                gp.emplace_back(col + 0.5, row + 0.5);
             }
         }
-        auto r3 = try_decode(gp3, gridCols, gridRows);
-        if (r3) {
-            std::cout << *r3 << std::flush;
+        return gp;
+    };
+
+    std::vector<MethodResult> methods;
+    auto report_failure = [&]() {
+        std::cerr << "\nDecode failed. All detection methods exhausted.\n";
+        std::cerr << "  image: " << width << "x" << height
+                  << ", grid: " << gridCols << "x" << gridRows << "\n";
+        for (const auto &m: methods) {
+            std::cerr << "  [" << m.name << "] " << m.particles << " particles";
+            if (!m.error.ok()) {
+                std::cerr << " -> " << errorName(m.error.code) << ": " << m.error.message;
+            }
+            std::cerr << "\n";
+        }
+        std::cerr << "Possible causes:\n"
+                  << "  - Not a Constellation field: expected cyan particles "
+                     "(R<80, G>100, B>100) on a dark background\n"
+                  << "  - Grid size mismatch: default is 60x60; retry with "
+                     "decode_image <image> <cols> <rows>\n"
+                  << "  - Old-format export (particle radius 1.5*scale): cores overlap "
+                     "and cannot be decoded\n";
+    };
+
+    try {
+        // Method 1: Color flood-fill (runs on a copy so the mask stays intact for DT)
+        {
+            std::vector<uint8_t> maskCopy = mask;
+            auto colorContours = detect_by_color(maskCopy, width, height);
+            methods.push_back(run_method(
+                "color flood-fill (centered)",
+                contours_to_grid(colorContours, gridCols, gridRows, width, height),
+                gridCols, gridRows));
+            if (methods.back().succeeded) {
+                std::cout << methods.back().payload << std::flush;
+                return 0;
+            }
+
+            // Method 4: Color + direct scale
+            methods.push_back(run_method(
+                "color flood-fill (direct scale)",
+                direct_grid(colorContours), gridCols, gridRows));
+            if (methods.back().succeeded) {
+                std::cout << methods.back().payload << std::flush;
+                return 0;
+            }
+        }
+
+        // Method 2: Distance transform
+        auto dtContours = detect_by_distance_transform(mask, width, height, gridCols, gridRows);
+        methods.push_back(run_method(
+            "distance transform (centered)",
+            contours_to_grid(dtContours, gridCols, gridRows, width, height),
+            gridCols, gridRows));
+        if (methods.back().succeeded) {
+            std::cout << methods.back().payload << std::flush;
             return 0;
         }
+
+        // Mask is no longer needed; release it before the last method.
+        std::vector<uint8_t>().swap(mask);
+
+        // Method 3: Direct grid-snapping without centering offset (for export images)
+        methods.push_back(run_method(
+            "distance transform (direct scale)",
+            direct_grid(dtContours), gridCols, gridRows));
+        if (methods.back().succeeded) {
+            std::cout << methods.back().payload << std::flush;
+            return 0;
+        }
+    } catch (const std::exception &e) {
+        std::cerr << "Internal error: " << e.what() << std::endl;
+        return 4;
     }
 
-    std::cerr << "Decode failed. All methods exhausted." << std::endl;
-    return 1;
+    report_failure();
+    return 3;
 }

@@ -1,11 +1,17 @@
 ﻿#include "particle_codec/grid_mapping.h"
 #include <algorithm>
 #include <stdexcept>
+#include <string>
 #include <cmath>
 
 namespace particle_codec {
     GridMapping::GridMapping(int cols, int rows, double cellWidth, double cellHeight, bool useMicroOffset)
         : cols(cols), rows(rows), cellWidth(cellWidth), cellHeight(cellHeight), useMicroOffset(useMicroOffset) {
+        if (cols < 1 || rows < 1) {
+            throw std::invalid_argument(
+                "GridMapping: grid dimensions must be positive, got " +
+                std::to_string(cols) + "x" + std::to_string(rows));
+        }
     }
 
     std::pair<int, int> GridMapping::bitIndexToGrid(int index) const {
@@ -59,7 +65,7 @@ namespace particle_codec {
         std::vector<uint8_t> bits(n, 0);
         for (auto [col, row]: grids) {
             int idx = gridToBitIndex(col, row);
-            if (idx < n) bits[idx] = 1;
+            if (idx >= 0 && idx < n) bits[idx] = 1;
         }
         return bits;
     }
@@ -81,6 +87,11 @@ namespace particle_codec {
     }
 
     std::vector<uint8_t> GridMapping::intToBytes(int value, int byteCount) {
+        if (byteCount < 0 || byteCount > 4) {
+            throw std::invalid_argument(
+                "GridMapping::intToBytes: byteCount must be in [0, 4], got " +
+                std::to_string(byteCount));
+        }
         std::vector<uint8_t> bytes(byteCount);
         for (int i = byteCount - 1; i >= 0; i--) {
             bytes[i] = value & 0xFF;
@@ -90,8 +101,18 @@ namespace particle_codec {
     }
 
     int GridMapping::bytesToInt(const std::vector<uint8_t> &bytes, int offset, int length) {
-        int value = 0;
+        if (offset < 0 || offset > static_cast<int>(bytes.size())) {
+            throw std::out_of_range(
+                "GridMapping::bytesToInt: offset " + std::to_string(offset) +
+                " out of range [0, " + std::to_string(bytes.size()) + "]");
+        }
         int end = (length < 0) ? static_cast<int>(bytes.size()) : offset + length;
+        if (end > static_cast<int>(bytes.size())) {
+            throw std::out_of_range(
+                "GridMapping::bytesToInt: range [" + std::to_string(offset) + ", " +
+                std::to_string(end) + ") exceeds buffer size " + std::to_string(bytes.size()));
+        }
+        int value = 0;
         for (int i = offset; i < end; i++)
             value = (value << 8) | bytes[i];
         return value;

@@ -15,8 +15,10 @@ namespace particle_codec {
 
         static std::vector<uint8_t> encodeChunk(const std::vector<uint8_t> &data);
 
+        // Throws std::invalid_argument if bits holds fewer than 7 bits.
         static std::vector<uint8_t> decodeChunk(const std::vector<uint8_t> &bits);
 
+        // Throws std::invalid_argument if bits holds fewer than 7 bits.
         static bool hasError(const std::vector<uint8_t> &bits);
 
         static int correctedErrorCount(const std::vector<uint8_t> &data);

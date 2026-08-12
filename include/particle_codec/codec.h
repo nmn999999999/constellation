@@ -3,6 +3,7 @@
 #include <string>
 #include <vector>
 #include <optional>
+#include "error.h"
 #include "pseudo_random.h"
 #include "grid_mapping.h"
 #include "coordinate_encoder.h"
@@ -16,12 +17,19 @@ namespace particle_codec {
     public:
         // No username: the mapping is derived from a fixed built-in seed input
         // plus the domain, so anyone can decode a particle field.
+        // Throws std::invalid_argument unless the grid is at least 1x1 and
+        // large enough to hold one frame header (gridCols * gridRows >= 96).
         ParticleCodec(const std::string &domain = "particle_codec",
                       int gridCols = 60, int gridRows = 60, bool useMicroOffset = false);
 
         std::vector<EncodedFrame> encode(const std::vector<uint8_t> &data);
 
         std::vector<EncodedFrame> encodeWithEcc(const std::vector<uint8_t> &data);
+
+        // Error-safe decode: on failure returns an ErrorInfo with the reason
+        // (NoParticles / SyncNotFound / PayloadTooLong / CrcMismatch / ...).
+        Result<std::vector<uint8_t> > decodeCentroidsDetailed(
+            const std::vector<std::pair<double, double> > &centroids);
 
         std::optional<std::vector<uint8_t> > decodeCentroids(const std::vector<std::pair<double, double> > &centroids);
 
@@ -32,6 +40,9 @@ namespace particle_codec {
             const std::vector<std::pair<double, double> > &centroids);
 
         void feedFrame(const std::vector<std::pair<double, double> > &centroids);
+
+        // Error-safe feed: reports why a frame was rejected.
+        Result<void> feedFrameDetailed(const std::vector<std::pair<double, double> > &centroids);
 
         void feedRawBytes(const std::vector<uint8_t> &frameBytes);
 
@@ -46,6 +57,10 @@ namespace particle_codec {
         int gridCols() const { return gridCols_; }
         int gridRows() const { return gridRows_; }
 
+        // Reason for the most recent failure of the legacy APIs
+        // (decodeCentroids / feedFrame / ...). Cleared after a successful call.
+        const ErrorInfo &lastError() const { return lastError_; }
+
         static bool verifyRoundtrip(const std::vector<uint8_t> &data, const std::string &domain = "particle_codec");
 
     private:
@@ -57,5 +72,6 @@ namespace particle_codec {
         MappingRestorer restorer_;
         FrameSplitter splitter_;
         FrameAssembler assembler_;
+        ErrorInfo lastError_;
     };
 } // namespace particle_codec

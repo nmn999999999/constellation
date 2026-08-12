@@ -2,6 +2,7 @@
 #include <cstdint>
 #include <vector>
 #include <memory>
+#include "error.h"
 #include "pseudo_random.h"
 #include "grid_mapping.h"
 #include "frame_builder.h"
@@ -23,6 +24,11 @@ namespace particle_codec {
 
         std::optional<std::vector<uint8_t> > tryDecodeFrame(const std::vector<std::pair<double, double> > &particles);
 
+        // Error-safe variant of tryDecodeFrame: fills outError with the reason
+        // (NoParticles / SyncNotFound / PayloadTooLong / CrcMismatch / ...).
+        std::optional<std::vector<uint8_t> > tryDecodeFrameEx(
+            const std::vector<std::pair<double, double> > &particles, ErrorInfo &outError);
+
         int getSeqFromParticles(const std::vector<std::pair<double, double> > &particles);
 
         std::optional<std::vector<uint8_t> > extractPayloadFromParticles(
@@ -43,5 +49,4 @@ namespace particle_codec {
         EncodedFrame encodeFrameInternal(const std::vector<uint8_t> &frameData, double time);
     };
 } // namespace particle_codec
-
 

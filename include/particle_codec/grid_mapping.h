@@ -11,6 +11,7 @@ namespace particle_codec {
         double cellHeight;
         bool useMicroOffset;
 
+        // Throws std::invalid_argument unless cols >= 1 and rows >= 1.
         GridMapping(int cols = 60, int rows = 60, double cellWidth = 1.0, double cellHeight = 1.0,
                     bool useMicroOffset = false);
 

@@ -1,6 +1,9 @@
 ﻿#include "particle_codec/hamming.h"
 #include "particle_codec/grid_mapping.h"
 
+#include <stdexcept>
+#include <string>
+
 namespace particle_codec {
     std::vector<uint8_t> HammingEncoder::encode(const std::vector<uint8_t> &data) {
         auto inputBits = GridMapping::bytesToBits(data);
@@ -18,6 +21,11 @@ namespace particle_codec {
     }
 
     std::vector<uint8_t> HammingEncoder::decode(const std::vector<uint8_t> &data, int originalLength) {
+        if (originalLength < 0) {
+            throw std::invalid_argument(
+                "HammingEncoder::decode: originalLength must be >= 0, got " +
+                std::to_string(originalLength));
+        }
         auto inputBits = GridMapping::bytesToBits(data);
         std::vector<uint8_t> dataOutput;
         dataOutput.reserve(inputBits.size() / totalBits * dataBits);
@@ -35,6 +43,11 @@ namespace particle_codec {
     }
 
     std::vector<uint8_t> HammingEncoder::encodeChunk(const std::vector<uint8_t> &data) {
+        if (data.size() < static_cast<size_t>(dataBits)) {
+            throw std::invalid_argument(
+                "HammingEncoder::encodeChunk: expected at least " +
+                std::to_string(dataBits) + " bits, got " + std::to_string(data.size()));
+        }
         std::vector<uint8_t> bits(totalBits, 0);
         bits[2] = data[0];
         bits[4] = data[1];
@@ -47,6 +60,11 @@ namespace particle_codec {
     }
 
     std::vector<uint8_t> HammingEncoder::decodeChunk(const std::vector<uint8_t> &bits) {
+        if (bits.size() < static_cast<size_t>(totalBits)) {
+            throw std::invalid_argument(
+                "HammingEncoder::decodeChunk: expected at least " +
+                std::to_string(totalBits) + " bits, got " + std::to_string(bits.size()));
+        }
         auto b = bits;
         int s1 = b[0] ^ b[2] ^ b[4] ^ b[6];
         int s2 = b[1] ^ b[2] ^ b[5] ^ b[6];
@@ -58,6 +76,11 @@ namespace particle_codec {
     }
 
     bool HammingEncoder::hasError(const std::vector<uint8_t> &bits) {
+        if (bits.size() < static_cast<size_t>(totalBits)) {
+            throw std::invalid_argument(
+                "HammingEncoder::hasError: expected at least " +
+                std::to_string(totalBits) + " bits, got " + std::to_string(bits.size()));
+        }
         return (bits[0] ^ bits[2] ^ bits[4] ^ bits[6]) |
                (bits[1] ^ bits[2] ^ bits[5] ^ bits[6]) |
                (bits[3] ^ bits[4] ^ bits[5] ^ bits[6]);

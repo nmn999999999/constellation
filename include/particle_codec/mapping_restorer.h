@@ -2,6 +2,7 @@
 #include <cstdint>
 #include <vector>
 #include <optional>
+#include "error.h"
 #include "pseudo_random.h"
 #include "grid_mapping.h"
 #include "frame_builder.h"
@@ -13,6 +14,11 @@ namespace particle_codec {
 
         std::optional<std::vector<uint8_t> > restoreFrame(const std::vector<std::pair<double, double> > &centroids);
 
+        // Error-safe variant: fills outError with the failure reason.
+        std::optional<std::vector<uint8_t> > restoreFrameEx(
+            const std::vector<std::pair<double, double> > &centroids, ErrorInfo &outError);
+
+        // Throws std::invalid_argument if count is negative or coords is too short.
         std::optional<std::vector<uint8_t> > restoreFrameFromFloat32(const std::vector<float> &coords, int count);
 
         int extractSeq(const std::vector<std::pair<double, double> > &centroids);

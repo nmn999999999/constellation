@@ -1,5 +1,7 @@
 ﻿#include "particle_codec/mapping_restorer.h"
 
+#include <stdexcept>
+
 namespace particle_codec {
     MappingRestorer::MappingRestorer(const std::vector<uint8_t> &seed, int gridCols, int gridRows)
         : gridCols_(gridCols), gridRows_(gridRows),
@@ -11,6 +13,18 @@ namespace particle_codec {
 
     std::optional<std::vector<uint8_t> > MappingRestorer::restoreFrame(
         const std::vector<std::pair<double, double> > &centroids) {
+        ErrorInfo ignored;
+        return restoreFrameEx(centroids, ignored);
+    }
+
+    std::optional<std::vector<uint8_t> > MappingRestorer::restoreFrameEx(
+        const std::vector<std::pair<double, double> > &centroids, ErrorInfo &outError) {
+        outError = ErrorInfo{};
+        if (centroids.empty()) {
+            outError = makeError(ErrorCode::NoParticles, "no particles supplied for decode");
+            return std::nullopt;
+        }
+
         int byteCount = (grid_.totalCells() + 7) / 8;
         std::vector<uint8_t> allBytes(byteCount, 0);
         for (auto [x, y]: centroids) {
@@ -22,22 +36,55 @@ namespace particle_codec {
             }
         }
 
-        if (static_cast<int>(allBytes.size()) < FrameHeader::totalSize) return std::nullopt;
+        if (static_cast<int>(allBytes.size()) < FrameHeader::totalSize) {
+            outError = makeError(
+                ErrorCode::FrameTooShort,
+                "grid capacity (" + std::to_string(allBytes.size()) +
+                " bytes) is smaller than a frame header (" +
+                std::to_string(FrameHeader::totalSize) + " bytes)");
+            return std::nullopt;
+        }
 
         auto header = FrameHeader::tryParse(allBytes);
-        if (!header) return std::nullopt;
+        if (!header) {
+            outError = makeError(ErrorCode::SyncNotFound,
+                                 "0xAA55AA55 sync word not found in recovered bits");
+            return std::nullopt;
+        }
 
         int totalLen = FrameHeader::totalSize + header->payloadLength;
-        if (static_cast<int>(allBytes.size()) < totalLen) return std::nullopt;
+        if (static_cast<int>(allBytes.size()) < totalLen) {
+            outError = makeError(
+                ErrorCode::PayloadTooLong,
+                "frame declares " + std::to_string(header->payloadLength) +
+                " payload bytes but the grid only holds " +
+                std::to_string(static_cast<int>(allBytes.size()) - FrameHeader::totalSize));
+            return std::nullopt;
+        }
 
         std::vector<uint8_t> frameBytes(allBytes.begin(), allBytes.begin() + totalLen);
-        if (!FrameBuilder::verifyCrc(frameBytes)) return std::nullopt;
+        if (!FrameBuilder::verifyCrc(frameBytes)) {
+            outError = makeError(ErrorCode::CrcMismatch,
+                                 "CRC32 verification failed for recovered frame");
+            return std::nullopt;
+        }
 
         return frameBytes;
     }
 
     std::optional<std::vector<uint8_t> > MappingRestorer::restoreFrameFromFloat32(
         const std::vector<float> &coords, int count) {
+        if (count < 0) {
+            throw std::invalid_argument(
+                "MappingRestorer::restoreFrameFromFloat32: count must be >= 0, got " +
+                std::to_string(count));
+        }
+        if (static_cast<size_t>(count) * 2 > coords.size()) {
+            throw std::invalid_argument(
+                "MappingRestorer::restoreFrameFromFloat32: count " + std::to_string(count) +
+                " needs " + std::to_string(count * 2) + " coords but only " +
+                std::to_string(coords.size()) + " were supplied");
+        }
         int byteCount = (grid_.totalCells() + 7) / 8;
         std::vector<uint8_t> allBytes(byteCount, 0);
         for (int i = 0; i < count; i++) {

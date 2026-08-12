@@ -21,6 +21,7 @@ else ()
 endif ()
 
 add_library(particle_codec
+        src/error.cpp
         src/pseudo_random.cpp
         src/perlin_noise.cpp
         src/grid_mapping.cpp
@@ -41,6 +42,10 @@ target_link_libraries(codec_demo PRIVATE particle_codec ${MINGW_PTHREAD_LINK})
 # Tests
 add_executable(codec_test tests/test_codec.cpp ${MINGW_COMPAT_SRC})
 target_link_libraries(codec_test PRIVATE particle_codec ${MINGW_PTHREAD_LINK})
+
+# Error-safety and error-feedback tests
+add_executable(error_safety_test tests/test_error_safety.cpp ${MINGW_COMPAT_SRC})
+target_link_libraries(error_safety_test PRIVATE particle_codec ${MINGW_PTHREAD_LINK})
 
 # CLI image decoder
 add_executable(decode_image demo/decode_image.cpp ${MINGW_COMPAT_SRC})
