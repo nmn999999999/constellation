@@ -9,6 +9,7 @@
 #include <particle_codec/frame_builder.h>
 #include <particle_codec/frame_parser.h>
 #include <particle_codec/grid_calibrator.h>
+#include <particle_codec/homography_calibrator.h>
 #include <particle_codec/particle_net.h>
 #include <algorithm>
 #include <cmath>
@@ -159,30 +160,24 @@ static std::vector<Contour> detect_by_distance_transform(
     return result;
 }
 
-// Warp the source image into the canonical 240x240 model input.
-// `aff` maps source pixels -> canonical grid coordinates (col+0.5,row+0.5).
+// Warp the source image into the canonical 240x240 model input through the
+// inverse of an image->grid transform (affine or homography).
 // Training feeds the CNN images produced by F.interpolate(480->240,
 // bilinear, align_corners=False), whose output pixel X samples source pixel
 // 2X + 0.5 (i.e. grid g = (2X + 0.5)/8 = X/4 + 0.0625). The warp must use
 // that same half-source-pixel convention or cells near particle edges flip.
 // Bilinear sampling, black outside the image.
-static bool warpToModel(const unsigned char *rgb, int w, int h,
-                        const GridCalibrator::Affine &aff,
-                        float *out240) {
-    double det = aff.a * aff.e - aff.b * aff.d;
-    if (std::abs(det) < 1e-9) return false;
-    double ia = aff.e / det, ib = -aff.b / det;
-    double id = -aff.d / det, ie = aff.a / det;
-    double ic = (aff.b * aff.f - aff.e * aff.c) / det;
-    double jc = (aff.d * aff.c - aff.a * aff.f) / det;
-
+static void warpToModelInv(const unsigned char *rgb, int w, int h,
+                           const double inv[3][3], float *out240) {
     const int S = ParticleNet::kInputSize;
     for (int y = 0; y < S; y++) {
         double gy = y / 4.0 + 0.0625;
         for (int x = 0; x < S; x++) {
             double gx = x / 4.0 + 0.0625;
-            double px = ia * gx + ib * gy + ic;
-            double py = id * gx + ie * gy + jc;
+            double wgt = inv[2][0] * gx + inv[2][1] * gy + inv[2][2];
+            if (std::abs(wgt) < 1e-12) wgt = 1.0;
+            double px = (inv[0][0] * gx + inv[0][1] * gy + inv[0][2]) / wgt;
+            double py = (inv[1][0] * gx + inv[1][1] * gy + inv[1][2]) / wgt;
             float *dst = out240 + (static_cast<size_t>(y) * S + x) * 3;
             if (px < 0 || px > w - 1 || py < 0 || py > h - 1) {
                 dst[0] = dst[1] = dst[2] = 0.0f;
@@ -204,6 +199,38 @@ static bool warpToModel(const unsigned char *rgb, int w, int h,
             }
         }
     }
+}
+
+// Inverse of an affine image->grid transform as a 3x3 matrix.
+static bool affineInverse(const GridCalibrator::Affine &aff, double inv[3][3]) {
+    double det = aff.a * aff.e - aff.b * aff.d;
+    if (std::abs(det) < 1e-9) return false;
+    double ia = aff.e / det, ib = -aff.b / det;
+    double id = -aff.d / det, ie = aff.a / det;
+    double ic = (aff.b * aff.f - aff.e * aff.c) / det;
+    double jc = (aff.d * aff.c - aff.a * aff.f) / det;
+    inv[0][0] = ia; inv[0][1] = ib; inv[0][2] = ic;
+    inv[1][0] = id; inv[1][1] = ie; inv[1][2] = jc;
+    inv[2][0] = 0; inv[2][1] = 0; inv[2][2] = 1;
+    return true;
+}
+
+// Inverse of a homography (adjugate / determinant).
+static bool homographyInverse(const Homography &h, double inv[3][3]) {
+    double a = h.h[0][0], b = h.h[0][1], c = h.h[0][2];
+    double d = h.h[1][0], e = h.h[1][1], f = h.h[1][2];
+    double g = h.h[2][0], k = h.h[2][1], m = h.h[2][2];
+    double det = a * (e * m - f * k) - b * (d * m - f * g) + c * (d * k - e * g);
+    if (std::abs(det) < 1e-12) return false;
+    inv[0][0] = (e * m - f * k) / det;
+    inv[0][1] = (c * k - b * m) / det;
+    inv[0][2] = (b * f - c * e) / det;
+    inv[1][0] = (f * g - d * m) / det;
+    inv[1][1] = (a * m - c * g) / det;
+    inv[1][2] = (c * d - a * f) / det;
+    inv[2][0] = (d * k - e * g) / det;
+    inv[2][1] = (b * g - a * k) / det;
+    inv[2][2] = (a * e - b * d) / det;
     return true;
 }
 
@@ -216,7 +243,7 @@ struct MlAttempt {
 };
 
 static MlAttempt ml_decode(const unsigned char *rgb, int w, int h,
-                           const GridCalibrator::Affine &aff,
+                           const double inv[3][3],
                            const ParticleNet &net, ParticleCodec &codec,
                            int gridCols, int gridRows,
                            const std::string &label) {
@@ -224,10 +251,7 @@ static MlAttempt ml_decode(const unsigned char *rgb, int w, int h,
     r.label = label;
     std::vector<float> model(static_cast<size_t>(ParticleNet::kInputSize) *
                              ParticleNet::kInputSize * 3);
-    if (!warpToModel(rgb, w, h, aff, model.data())) {
-        r.error = "bad affine";
-        return r;
-    }
+    warpToModelInv(rgb, w, h, inv, model.data());
 
     std::vector<float> logits(static_cast<size_t>(ParticleNet::kGrid) *
                               ParticleNet::kGrid);
@@ -361,6 +385,24 @@ int main(int argc, char *argv[]) {
               << ", dt particles: " << dtCentroids.size() << std::endl;
 
     ParticleCodec codec("particle_codec", gridCols, gridRows);
+    auto run_and_report = [&](const std::string &label,
+                              const double inv[3][3]) -> bool {
+        auto r = ml_decode(img, width, height, inv, net, codec, gridCols,
+                           gridRows, label);
+        std::cout << "  [" << r.label << "] cells=" << r.cells;
+        if (r.succeeded) {
+            std::cout << " OK" << std::endl;
+#ifdef _WIN32
+            // Payload is binary: disable CRLF translation.
+            _setmode(_fileno(stdout), _O_BINARY);
+#endif
+            std::cout << r.payload << std::flush;
+            return true;
+        }
+        std::cout << " -> " << r.error << std::endl;
+        return false;
+    };
+
     auto try_centroids = [&](const std::vector<std::pair<double, double> > &pts,
                              const char *tag) -> bool {
         std::vector<GridCalibrator::Affine> variants;
@@ -394,19 +436,30 @@ int main(int argc, char *argv[]) {
             std::string label = std::string(tag) + (cal.valid
                 ? " calibrated (orientation " + std::to_string(v) + ")"
                 : " direct");
-            auto r = ml_decode(img, width, height, aligned, net, codec,
-                               gridCols, gridRows, label);
-            std::cout << "  [" << r.label << "] cells=" << r.cells;
-            if (r.succeeded) {
-                std::cout << " OK" << std::endl;
-#ifdef _WIN32
-                // Payload is binary: disable CRLF translation.
-                _setmode(_fileno(stdout), _O_BINARY);
-#endif
-                std::cout << r.payload << std::flush;
-                return true;
-            }
-            std::cout << " -> " << r.error << std::endl;
+            double inv[3][3];
+            if (!affineInverse(aligned, inv)) continue;
+            if (run_and_report(label, inv)) return true;
+        }
+        return false;
+    };
+
+    // Perspective fallback: fit a homography (8-DOF) from the detected
+    // centroids, which handles keystone distortion from angled photos.
+    auto try_homography = [&](const std::vector<std::pair<double, double> > &pts,
+                              const char *tag) -> bool {
+        Homography hs[HomographyCalibrator::kMaxVariants];
+        int n = HomographyCalibrator::calibrate(pts, gridCols, gridRows, hs);
+        if (n <= 0) {
+            std::cout << "  [" << tag << "] homography calibration failed"
+                      << std::endl;
+            return false;
+        }
+        for (int k = 0; k < n; k++) {
+            double inv[3][3];
+            if (!homographyInverse(hs[k], inv)) continue;
+            std::string label = std::string(tag) +
+                                " homography variant " + std::to_string(k);
+            if (run_and_report(label, inv)) return true;
         }
         return false;
     };
@@ -414,6 +467,10 @@ int main(int argc, char *argv[]) {
     if (try_centroids(colorCentroids, "ml color"))
         { stbi_image_free(img); return 0; }
     if (try_centroids(dtCentroids, "ml dt"))
+        { stbi_image_free(img); return 0; }
+    if (try_homography(dtCentroids, "ml dt"))
+        { stbi_image_free(img); return 0; }
+    if (try_homography(colorCentroids, "ml color"))
         { stbi_image_free(img); return 0; }
     stbi_image_free(img);
     std::cerr << "Decode failed. All geometry variants exhausted."

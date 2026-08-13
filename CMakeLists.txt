@@ -23,6 +23,7 @@ endif ()
 add_library(particle_codec
         src/error.cpp
         src/grid_calibrator.cpp
+        src/homography_calibrator.cpp
         src/pseudo_random.cpp
         src/perlin_noise.cpp
         src/grid_mapping.cpp
@@ -52,6 +53,10 @@ target_link_libraries(error_safety_test PRIVATE particle_codec ${MINGW_PTHREAD_L
 # Grid geometry calibration tests (rotation/scale/shift recovery)
 add_executable(test_grid_calibrator tests/test_grid_calibrator.cpp ${MINGW_COMPAT_SRC})
 target_link_libraries(test_grid_calibrator PRIVATE particle_codec ${MINGW_PTHREAD_LINK})
+
+# Perspective (homography) calibration test
+add_executable(test_homography tests/test_homography.cpp ${MINGW_COMPAT_SRC})
+target_link_libraries(test_homography PRIVATE particle_codec ${MINGW_PTHREAD_LINK})
 
 # CLI image decoder
 add_executable(decode_image demo/decode_image.cpp ${MINGW_COMPAT_SRC})
