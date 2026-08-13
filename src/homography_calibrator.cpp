@@ -300,7 +300,8 @@ int HomographyCalibrator::calibrate(
                 auto m = h.map(centroids[i].first, centroids[i].second);
                 double ri = std::round(m.first - 0.5);
                 double rj = std::round(m.second - 0.5);
-                if (ri < 0 || rj < 0 || ri >= gridCols || rj >= gridRows)
+                if (ri < -1 || rj < -1 || ri > gridCols + 1 ||
+                    rj > gridRows + 1)
                     continue;
                 double ex = m.first - (ri + 0.5);
                 double ey = m.second - (rj + 0.5);
@@ -310,30 +311,8 @@ int HomographyCalibrator::calibrate(
                 }
             }
             if (pts2.size() < 12) break;
-            Homography cand = h;
-            if (!fitDlt(pts2, grd2, cand.h)) break;
-            refineHomography(pts2, grd2, cand.h);
-            double cov2 = 0;
-            for (int i = 0; i < n; i++) {
-                auto m = cand.map(centroids[i].first, centroids[i].second);
-                double ex = m.first - (std::round(m.first - 0.5) + 0.5);
-                double ey = m.second - (std::round(m.second - 0.5) + 0.5);
-                if (ex * ex + ey * ey <= kTolCell * kTolCell) cov2++;
-            }
-            cov2 /= n;
-            double cov1 = 0;
-            for (int i = 0; i < n; i++) {
-                auto m = h.map(centroids[i].first, centroids[i].second);
-                double ex = m.first - (std::round(m.first - 0.5) + 0.5);
-                double ey = m.second - (std::round(m.second - 0.5) + 0.5);
-                if (ex * ex + ey * ey <= kTolCell * kTolCell) cov1++;
-            }
-            cov1 /= n;
-            if (cov2 > cov1 + 0.02) {
-                h = cand;
-            } else {
-                break;
-            }
+            if (!fitDlt(pts2, grd2, h.h)) break;
+            refineHomography(pts2, grd2, h.h);
         }
 
         double coverage = 0;
