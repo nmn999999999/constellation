@@ -117,6 +117,28 @@ included at `models/particle_detector.bin`; copy it next to the exe (or pass
 its path) and decode right away. The CNN inference is hand-written C++ (no
 external ML runtime), keeping the single-file, no-DLL build.
 
+### Measured decode limits (hybrid decoder, 2026-08-13)
+
+Tested on a 480×480 synthetic field with a 60-px margin around the 360×360
+particle field (i.e. the whole field stays inside the frame):
+
+| Factor | Pass | Fail |
+|---|---|---|
+| Rotation | up to 30° | 35°+ |
+| Scale | 0.5 – 1.35× | 1.4× (field cropped out of frame) |
+| Translation | up to the frame margin (60 px) | beyond margin (field cropped) |
+| Perspective tilt | ≤ 0.005 | 0.01+ |
+| Gaussian blur | radius ≤ 2.0 | 3.0+ |
+| Noise (σ) | ≤ 0.10 | 0.15+ |
+| Brightness | 0.55× – 1.5× | 0.4× |
+| JPEG quality | down to q10 | — |
+| Color shift (R/B gain) | down to 0.55 | — |
+
+Combined worst case (rotation 4° + scale 0.9 + shift 30 px + blur 1.0 +
+noise σ0.05 + JPEG q40) decodes correctly. The dominant limit is **field
+visibility**: any transform that crops particles out of the frame loses
+information physically and cannot be recovered by any decoder.
+
 Video adds redundancy: `test_video_generate` renders a multi-frame animation
 (Perlin drift, optional crossfade and Hamming ECC), `ffmpeg` composes it into a
 video, and `test_video_decode` decodes every frame, locks the global geometry
