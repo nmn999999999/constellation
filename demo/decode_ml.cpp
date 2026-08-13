@@ -81,6 +81,84 @@ static std::vector<Contour> detect_by_color(std::vector<uint8_t> &mask,
     return contours;
 }
 
+// Distance transform + local maxima: separates overlapping glow blobs into
+// individual particle centers (the color flood-fill merges them when the
+// glow radius exceeds half the grid spacing, e.g. the 1080 export).
+static std::vector<Contour> detect_by_distance_transform(
+    const std::vector<uint8_t> &mask, int w, int h, int gridCols,
+    int gridRows) {
+    int total = w * h;
+    int count = 0;
+    for (int i = 0; i < total; i++) count += mask[i];
+    if (count < 10) return {};
+
+    std::vector<float> dt(total, 0.0f);
+    const float INF = 1e9f;
+    for (int y = 0; y < h; y++) {
+        for (int x = 0; x < w; x++) {
+            int i = y * w + x;
+            if (!mask[i]) continue;
+            float best = INF;
+            if (y > 0 && x > 0) best = std::min(best, dt[(y - 1) * w + (x - 1)] + 1.414f);
+            if (y > 0) best = std::min(best, dt[(y - 1) * w + x] + 1.0f);
+            if (y > 0 && x < w - 1) best = std::min(best, dt[(y - 1) * w + (x + 1)] + 1.414f);
+            if (x > 0) best = std::min(best, dt[y * w + (x - 1)] + 1.0f);
+            dt[i] = (best < INF) ? best : 1.0f;
+        }
+    }
+    for (int y = h - 1; y >= 0; y--) {
+        for (int x = w - 1; x >= 0; x--) {
+            int i = y * w + x;
+            if (!mask[i]) continue;
+            if (y < h - 1 && x > 0) dt[i] = std::min(dt[i], dt[(y + 1) * w + (x - 1)] + 1.414f);
+            if (y < h - 1) dt[i] = std::min(dt[i], dt[(y + 1) * w + x] + 1.0f);
+            if (y < h - 1 && x < w - 1) dt[i] = std::min(dt[i], dt[(y + 1) * w + (x + 1)] + 1.414f);
+            if (x < w - 1) dt[i] = std::min(dt[i], dt[y * w + (x + 1)] + 1.0f);
+        }
+    }
+
+    struct Peak {
+        int x, y;
+        float val;
+    };
+    std::vector<Peak> peaks;
+    for (int y = 1; y < h - 1; y++) {
+        for (int x = 1; x < w - 1; x++) {
+            int i = y * w + x;
+            float v = dt[i];
+            if (v < 1.5f) continue;
+            bool isMax = true;
+            for (int dy = -1; dy <= 1 && isMax; dy++)
+                for (int dx = -1; dx <= 1 && isMax; dx++) {
+                    if (dx == 0 && dy == 0) continue;
+                    if (dt[(y + dy) * w + (x + dx)] >= v) isMax = false;
+                }
+            if (isMax) peaks.push_back({x, y, v});
+        }
+    }
+    std::sort(peaks.begin(), peaks.end(),
+              [](const Peak &a, const Peak &b) { return a.val > b.val; });
+
+    double estSpacingX = static_cast<double>(w) / gridCols;
+    double estSpacingY = static_cast<double>(h) / gridRows;
+    double minSpacing = std::min(estSpacingX, estSpacingY) * 0.4;
+    std::vector<Contour> result;
+    for (const auto &p : peaks) {
+        bool tooClose = false;
+        for (const auto &q : result) {
+            double dx = p.x - q.cx;
+            double dy = p.y - q.cy;
+            if (std::sqrt(dx * dx + dy * dy) < minSpacing) {
+                tooClose = true;
+                break;
+            }
+        }
+        if (!tooClose) result.push_back({static_cast<double>(p.x),
+                                         static_cast<double>(p.y), 1});
+    }
+    return result;
+}
+
 // Warp the source image into the canonical 240x240 model input.
 // `aff` maps source pixels -> canonical grid coordinates (col+0.5,row+0.5).
 // Training feeds the CNN images produced by F.interpolate(480->240,
@@ -269,65 +347,74 @@ int main(int argc, char *argv[]) {
             mask[i] = 1;
             weights[i] = static_cast<float>(img[i * 3 + 1] + img[i * 3 + 2]);
         }
+    std::vector<uint8_t> maskForDT = mask;  // color detection consumes mask
     auto contours = detect_by_color(mask, width, height, &weights);
 
-    std::vector<std::pair<double, double> > centroids;
-    for (const auto &c : contours) centroids.emplace_back(c.cx, c.cy);
+    std::vector<std::pair<double, double> > colorCentroids;
+    for (const auto &c : contours) colorCentroids.emplace_back(c.cx, c.cy);
+    std::vector<std::pair<double, double> > dtCentroids;
+    for (const auto &c : detect_by_distance_transform(maskForDT, width, height,
+                                                      gridCols, gridRows))
+        dtCentroids.emplace_back(c.cx, c.cy);
     std::cout << "Image: " << width << "x" << height
-              << ", detected particles: " << centroids.size() << std::endl;
-
-    std::vector<GridCalibrator::Affine> variants;
-    auto cal = GridCalibrator::calibrate(centroids, gridCols, gridRows);
-    if (cal.valid) {
-        variants = {cal, cal.rotated(), cal.rotated().rotated(),
-                    cal.rotated().rotated().rotated()};
-    } else {
-        std::cout << "Grid calibration failed; falling back to axis-aligned "
-                     "full-frame mapping" << std::endl;
-        GridCalibrator::Affine direct;
-        direct.a = static_cast<double>(gridCols) / width;
-        direct.e = static_cast<double>(gridRows) / height;
-        direct.valid = true;
-        variants = {direct};
-    }
+              << ", color particles: " << colorCentroids.size()
+              << ", dt particles: " << dtCentroids.size() << std::endl;
 
     ParticleCodec codec("particle_codec", gridCols, gridRows);
-    for (size_t v = 0; v < variants.size(); v++) {
-        // GridCalibrator's translation is arbitrary: the field may land on
-        // grid cells [k, k+60). Align it so the canonical 240 image covers
-        // cells [0, 60) (same as decode_image.cpp's map_and_align step).
-        GridCalibrator::Affine aligned = variants[v];
-        if (!centroids.empty()) {
-            double minX = 1e18, minY = 1e18;
-            for (const auto &c : centroids) {
-                auto m = aligned.map(c.first, c.second);
-                minX = std::min(minX, m.first);
-                minY = std::min(minY, m.second);
+    auto try_centroids = [&](const std::vector<std::pair<double, double> > &pts,
+                             const char *tag) -> bool {
+        std::vector<GridCalibrator::Affine> variants;
+        auto cal = GridCalibrator::calibrate(pts, gridCols, gridRows);
+        if (cal.valid) {
+            variants = {cal, cal.rotated(), cal.rotated().rotated(),
+                        cal.rotated().rotated().rotated()};
+        } else {
+            std::cout << "  [" << tag << "] calibration failed; "
+                         "axis-aligned fallback" << std::endl;
+            GridCalibrator::Affine direct;
+            direct.a = static_cast<double>(gridCols) / width;
+            direct.e = static_cast<double>(gridRows) / height;
+            direct.valid = true;
+            variants = {direct};
+        }
+        for (size_t v = 0; v < variants.size(); v++) {
+            // GridCalibrator's translation is arbitrary: align so the
+            // canonical 240 image covers cells [0, 60) (map_and_align).
+            GridCalibrator::Affine aligned = variants[v];
+            if (!pts.empty()) {
+                double minX = 1e18, minY = 1e18;
+                for (const auto &c : pts) {
+                    auto m = aligned.map(c.first, c.second);
+                    minX = std::min(minX, m.first);
+                    minY = std::min(minY, m.second);
+                }
+                aligned.c -= std::round(minX - 0.5);
+                aligned.f -= std::round(minY - 0.5);
             }
-            aligned.c -= std::round(minX - 0.5);
-            aligned.f -= std::round(minY - 0.5);
-        }
-        std::string label = cal.valid
-            ? "ml calibrated (orientation " + std::to_string(v) + ")"
-            : "ml direct";
-        auto r = ml_decode(img, width, height, aligned, net, codec,
-                           gridCols, gridRows, label);
-        std::cout << "  [" << r.label << "] cells=" << r.cells;
-        if (r.succeeded) {
-            std::cout << " OK" << std::endl;
+            std::string label = std::string(tag) + (cal.valid
+                ? " calibrated (orientation " + std::to_string(v) + ")"
+                : " direct");
+            auto r = ml_decode(img, width, height, aligned, net, codec,
+                               gridCols, gridRows, label);
+            std::cout << "  [" << r.label << "] cells=" << r.cells;
+            if (r.succeeded) {
+                std::cout << " OK" << std::endl;
 #ifdef _WIN32
-            // Payload is binary: disable CRLF translation so 0x0A bytes are
-            // not expanded to 0x0D 0x0A (and no NUL mangling) when stdout is
-            // redirected to a file or pipe.
-            _setmode(_fileno(stdout), _O_BINARY);
+                // Payload is binary: disable CRLF translation.
+                _setmode(_fileno(stdout), _O_BINARY);
 #endif
-            std::cout << r.payload << std::flush;
-            stbi_image_free(img);
-            return 0;
+                std::cout << r.payload << std::flush;
+                return true;
+            }
+            std::cout << " -> " << r.error << std::endl;
         }
-        std::cout << " -> " << r.error << std::endl;
-    }
+        return false;
+    };
 
+    if (try_centroids(colorCentroids, "ml color"))
+        { stbi_image_free(img); return 0; }
+    if (try_centroids(dtCentroids, "ml dt"))
+        { stbi_image_free(img); return 0; }
     stbi_image_free(img);
     std::cerr << "Decode failed. All geometry variants exhausted."
               << std::endl;
