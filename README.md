@@ -127,7 +127,7 @@ particle field (i.e. the whole field stays inside the frame):
 | Rotation | up to 30° | 35°+ |
 | Scale | 0.5 – 1.35× | 1.4× (field cropped out of frame) |
 | Translation | up to the frame margin (60 px) | beyond margin (field cropped) |
-| Perspective tilt | ≤ 0.005 | 0.01+ |
+| Perspective tilt | ~0 (affine pipeline) | any keystone breaks the affine fit; the new homography calibrator (`HomographyCalibrator`) is a best-effort fallback (unit-tested, end-to-end still WIP) |
 | Gaussian blur | radius ≤ 2.0 | 3.0+ |
 | Noise (σ) | ≤ 0.10 | 0.15+ |
 | Brightness | 0.55× – 1.5× | 0.4× |
