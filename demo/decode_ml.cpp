@@ -83,9 +83,11 @@ static std::vector<Contour> detect_by_color(std::vector<uint8_t> &mask,
 
 // Warp the source image into the canonical 240x240 model input.
 // `aff` maps source pixels -> canonical grid coordinates (col+0.5,row+0.5).
-// A canonical 240 image places grid unit g at pixel X = g*4 (cell col=0
-// center g=0.5 -> X=2), matching the training renders. Bilinear sampling,
-// black outside the image (matches the zero-padding used in training).
+// Training feeds the CNN images produced by F.interpolate(480->240,
+// bilinear, align_corners=False), whose output pixel X samples source pixel
+// 2X + 0.5 (i.e. grid g = (2X + 0.5)/8 = X/4 + 0.0625). The warp must use
+// that same half-source-pixel convention or cells near particle edges flip.
+// Bilinear sampling, black outside the image.
 static bool warpToModel(const unsigned char *rgb, int w, int h,
                         const GridCalibrator::Affine &aff,
                         float *out240) {
@@ -98,9 +100,9 @@ static bool warpToModel(const unsigned char *rgb, int w, int h,
 
     const int S = ParticleNet::kInputSize;
     for (int y = 0; y < S; y++) {
-        double gy = y / 4.0;
+        double gy = y / 4.0 + 0.0625;
         for (int x = 0; x < S; x++) {
-            double gx = x / 4.0;
+            double gx = x / 4.0 + 0.0625;
             double px = ia * gx + ib * gy + ic;
             double py = id * gx + ie * gy + jc;
             float *dst = out240 + (static_cast<size_t>(y) * S + x) * 3;
