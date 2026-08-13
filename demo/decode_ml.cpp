@@ -38,11 +38,22 @@ static inline bool is_cyan(unsigned char r, unsigned char g, unsigned char b) {
     return r < 80 && g > 100 && b > 100 && b > r + 20 && g > r + 20;
 }
 
+// Core-biased mask: only the bright particle core (0,188,212) passes, not
+// the dim glow (0,100,130). When glow radius exceeds half the grid spacing
+// (or blur/glare smears particles), the glow mask merges neighbouring
+// particles into big blobs; the core mask keeps them separable for the
+// distance transform.
+static inline bool is_cyan_core(unsigned char r, unsigned char g,
+                                unsigned char b) {
+    return r < 90 && g > 150 && b > 150 && b > r + 40 && g > r + 40;
+}
+
 // Intensity-weighted color flood-fill (same as decode_image.cpp).
 static std::vector<Contour> detect_by_color(std::vector<uint8_t> &mask,
                                             int w, int h,
                                             const std::vector<float> *weights) {
     std::vector<Contour> contours;
+    std::vector<int> cMinX, cMaxX, cMinY, cMaxY, cMaxW;
     std::vector<int> stack;
     const int dx8[] = {-1, 0, 1, -1, 1, -1, 0, 1};
     const int dy8[] = {-1, -1, -1, 0, 0, 1, 1, 1};
@@ -53,6 +64,8 @@ static std::vector<Contour> detect_by_color(std::vector<uint8_t> &mask,
             if (mask[idx] == 0) continue;
             double sumX = 0, sumY = 0, sumW = 0;
             int count = 0;
+            int minX = x, maxX = x, minY = y, maxY = y;
+            int maxW = 0;
             stack.clear();
             stack.push_back(idx);
             mask[idx] = 0;
@@ -65,6 +78,12 @@ static std::vector<Contour> detect_by_color(std::vector<uint8_t> &mask,
                 sumX += cx * wt;
                 sumY += cy * wt;
                 sumW += wt;
+                int wti = static_cast<int>(wt);
+                if (wti > maxW) maxW = wti;
+                minX = std::min(minX, cx);
+                maxX = std::max(maxX, cx);
+                minY = std::min(minY, cy);
+                maxY = std::max(maxY, cy);
                 count++;
                 for (int d = 0; d < 8; d++) {
                     int nx = cx + dx8[d], ny = cy + dy8[d];
@@ -75,9 +94,37 @@ static std::vector<Contour> detect_by_color(std::vector<uint8_t> &mask,
                     stack.push_back(nidx);
                 }
             }
-            if (count >= 3 && sumW > 0)
+            if (count >= 3 && sumW > 0) {
                 contours.push_back({sumX / sumW, sumY / sumW, count});
+                cMinX.push_back(minX);
+                cMaxX.push_back(maxX);
+                cMinY.push_back(minY);
+                cMaxY.push_back(maxY);
+                cMaxW.push_back(maxW);
+            }
         }
+    }
+    // Robust filtering: keep only compact, round blobs near the dominant
+    // particle size. Fragments (tiny noise) and merged blobs (glow/glare
+    // clusters) are rejected so calibration gets clean centroids.
+    if (contours.size() >= 6) {
+        std::vector<int> areas;
+        for (const auto &c : contours) areas.push_back(c.area);
+        std::sort(areas.begin(), areas.end());
+        int med = areas[areas.size() / 2];
+        std::vector<Contour> kept;
+        for (size_t i = 0; i < contours.size(); i++) {
+            int bw = cMaxX[i] - cMinX[i] + 1;
+            int bh = cMaxY[i] - cMinY[i] + 1;
+            double roundness =
+                static_cast<double>(contours[i].area) / std::max(bw * bh, 1);
+            if (contours[i].area < std::max(3, med / 4)) continue;
+            if (contours[i].area > med * 5) continue;
+            if (roundness < 0.25) continue;
+            if (cMaxW[i] < 200) continue;  // must contain a bright core
+            kept.push_back(contours[i]);
+        }
+        if (kept.size() >= 6) contours = kept;
     }
     return contours;
 }
@@ -364,20 +411,22 @@ int main(int argc, char *argv[]) {
 
     // Geometry from the classical pipeline: color detection -> calibrator.
     int total = width * height;
-    std::vector<uint8_t> mask(total, 0);
+    std::vector<uint8_t> mask(total, 0), coreMask(total, 0);
     std::vector<float> weights(total, 0);
-    for (int i = 0; i < total; i++)
-        if (is_cyan(img[i * 3], img[i * 3 + 1], img[i * 3 + 2])) {
+    for (int i = 0; i < total; i++) {
+        unsigned char r = img[i * 3], g = img[i * 3 + 1], b = img[i * 3 + 2];
+        if (is_cyan(r, g, b)) {
             mask[i] = 1;
-            weights[i] = static_cast<float>(img[i * 3 + 1] + img[i * 3 + 2]);
+            weights[i] = static_cast<float>(g + b);
         }
-    std::vector<uint8_t> maskForDT = mask;  // color detection consumes mask
+        if (is_cyan_core(r, g, b)) coreMask[i] = 1;
+    }
     auto contours = detect_by_color(mask, width, height, &weights);
 
     std::vector<std::pair<double, double> > colorCentroids;
     for (const auto &c : contours) colorCentroids.emplace_back(c.cx, c.cy);
     std::vector<std::pair<double, double> > dtCentroids;
-    for (const auto &c : detect_by_distance_transform(maskForDT, width, height,
+    for (const auto &c : detect_by_distance_transform(coreMask, width, height,
                                                       gridCols, gridRows))
         dtCentroids.emplace_back(c.cx, c.cy);
     std::cout << "Image: " << width << "x" << height
