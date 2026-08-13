@@ -40,6 +40,11 @@ Then export the weights and decode with the C++ hybrid CLI:
     python export_net.py particle_detector.pt particle_detector.bin
     build\decode_ml.exe photo.png particle_detector.bin
 
+The repo ships a pretrained detector at `models/particle_detector.bin`
+(20 epochs / 5000 frames, 100% validation bit-acc) plus the PyTorch weights
+at `models/particle_detector.pt`, so decoding works out of the box without
+training first.
+
 Verified end-to-end locally: canonical export image and a 2-deg / 0.95-scale
 photograph-style warp both recover the full payload (886/886 cells detected).
 
