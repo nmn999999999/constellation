@@ -18,6 +18,8 @@
 #include <string>
 #include <vector>
 #ifdef _WIN32
+#include <fcntl.h>
+#include <io.h>
 #include <windows.h>
 #endif
 
@@ -311,6 +313,12 @@ int main(int argc, char *argv[]) {
         std::cout << "  [" << r.label << "] cells=" << r.cells;
         if (r.succeeded) {
             std::cout << " OK" << std::endl;
+#ifdef _WIN32
+            // Payload is binary: disable CRLF translation so 0x0A bytes are
+            // not expanded to 0x0D 0x0A (and no NUL mangling) when stdout is
+            // redirected to a file or pipe.
+            _setmode(_fileno(stdout), _O_BINARY);
+#endif
             std::cout << r.payload << std::flush;
             stbi_image_free(img);
             return 0;
