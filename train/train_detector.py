@@ -162,6 +162,39 @@ def warp_batch(x, angle_range, device, scale_range=(0.85, 1.15), shift=12.0):
     return photo, theta_target
 
 
+def augment_canonical(photo, device):
+    """Photometric + tiny residual-geometry augmentation for detector-only
+    training. Geometry itself is GridCalibrator's job at inference, so the
+    residual affine is small (+-0.6 deg / +-1.5% zoom / +-1.2 px). The point
+    is robustness to real-photo lighting, blur and calibration residuals."""
+    b = photo.shape[0]
+    # per-channel color jitter (synthetic renders have fixed colors; real
+    # photos of the same field vary in tint/brightness)
+    gain = 0.85 + 0.30 * torch.rand(b, 3, 1, 1, device=device)
+    bias = (torch.rand(b, 3, 1, 1, device=device) - 0.5) * 0.08
+    photo = torch.clamp(photo * gain + bias, 0.0, 1.0)
+    # occasional box blur (compression / out-of-focus)
+    if torch.rand(1, device=device).item() < 0.35:
+        photo = F.avg_pool2d(photo, 3, stride=1, padding=1)
+    # sensor noise
+    photo = torch.clamp(photo + torch.randn_like(photo) * 0.02, 0.0, 1.0)
+    # tiny residual affine with border padding (no black holes)
+    angle = np.random.uniform(-0.6, 0.6, b)
+    sc = np.random.uniform(0.985, 1.015, b)
+    tx = np.random.uniform(-1.2, 1.2, b)
+    ty = np.random.uniform(-1.2, 1.2, b)
+    theta = np.zeros((b, 2, 3), np.float32)
+    for i in range(b):
+        rad = math.radians(angle[i])
+        cs, sn = math.cos(rad), math.sin(rad)
+        theta[i, 0] = [sc[i] * cs, -sc[i] * sn, tx[i] / 120.0]
+        theta[i, 1] = [sc[i] * sn, sc[i] * cs, ty[i] / 120.0]
+    grid = F.affine_grid(torch.from_numpy(theta).to(device),
+                         photo.size(), align_corners=False)
+    return F.grid_sample(photo, grid, align_corners=False,
+                         padding_mode="border")
+
+
 def rectify(photo, theta):
     """Sample `photo` with an affine rectification theta (output->input)."""
     grid = F.affine_grid(theta, photo.size(), align_corners=False)
@@ -326,6 +359,9 @@ def main():
                     help="train ONLY the detection subnet on teacher-forced "
                          "rectified images (no STN/localization). Use this "
                          "for the hybrid GridCalibrator + CNN decoder.")
+    ap.add_argument("--no-photo-aug", action="store_true",
+                    help="detector-only: skip photometric/residual "
+                         "augmentation (pure clean canonical images)")
     ap.add_argument("--out", default="particle_detector.pt")
     ap.add_argument("--onnx", default="particle_detector.onnx")
     ap.add_argument("--checkpoint", default="checkpoint_last.pt")
@@ -400,8 +436,8 @@ def main():
                 photo = F.interpolate(x.to(device).float().div_(255.0),
                                       size=(IMG_SIZE, IMG_SIZE),
                                       mode="bilinear", align_corners=False)
-                photo = torch.clamp(photo + torch.randn_like(photo) * 0.01,
-                                    0.0, 1.0)
+                if not args.no_photo_aug:
+                    photo = augment_canonical(photo, device)
                 logits = model.net(photo)
                 loss = loss_fn(logits, y)
                 bce = loss
