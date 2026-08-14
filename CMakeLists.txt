@@ -13,8 +13,11 @@ if (MINGW)
     add_link_options(-static-libgcc -static-libstdc++)
     # winpthread must be scanned after libstdc++ has pulled the pthread symbols
     # used by iostreams; pass these via link libraries (placed after the objects)
-    # rather than link options (placed before them).
-    set(MINGW_PTHREAD_LINK -Wl,-Bstatic -lstdc++ -lpthread -Wl,-Bdynamic)
+    # rather than link options (placed before them). --whole-archive forces the
+    # static archive to be fully extracted, so the DLL import library that the
+    # MinGW driver appends (-lpthread) finds nothing left to pull in.
+    set(MINGW_PTHREAD_LINK
+        -Wl,-Bstatic,--whole-archive,-lwinpthread,--no-whole-archive,-Bdynamic)
 else ()
     set(MINGW_COMPAT_SRC "")
     set(MINGW_PTHREAD_LINK "")
@@ -34,6 +37,7 @@ add_library(particle_codec
         src/codec.cpp
         src/hamming.cpp
         src/particle_net.cpp
+        src/fast_nn.cpp
 )
 
 target_include_directories(particle_codec PUBLIC include)

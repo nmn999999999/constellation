@@ -1,4 +1,4 @@
-﻿#include "particle_codec/mapping_restorer.h"
+#include "particle_codec/mapping_restorer.h"
 
 #include <stdexcept>
 
@@ -25,16 +25,7 @@ namespace particle_codec {
             return std::nullopt;
         }
 
-        int byteCount = (grid_.totalCells() + 7) / 8;
-        std::vector<uint8_t> allBytes(byteCount, 0);
-        for (auto [x, y]: centroids) {
-            auto [col, row] = grid_.centerToGrid(x, y);
-            int shuffledIdx = grid_.gridToBitIndex(col, row);
-            if (shuffledIdx >= 0 && shuffledIdx < grid_.totalCells()) {
-                int bitIdx = invPerm_[shuffledIdx];
-                allBytes[bitIdx / 8] |= static_cast<uint8_t>(1 << (7 - (bitIdx % 8)));
-            }
-        }
+        std::vector<uint8_t> allBytes = grid_.mapParticlesToBits(centroids, invPerm_);
 
         if (static_cast<int>(allBytes.size()) < FrameHeader::totalSize) {
             outError = makeError(
@@ -76,16 +67,7 @@ namespace particle_codec {
         const std::vector<std::pair<double, double> > &centroids) {
         if (centroids.empty()) return std::nullopt;
 
-        int byteCount = (grid_.totalCells() + 7) / 8;
-        std::vector<uint8_t> allBytes(byteCount, 0);
-        for (auto [x, y]: centroids) {
-            auto [col, row] = grid_.centerToGrid(x, y);
-            int shuffledIdx = grid_.gridToBitIndex(col, row);
-            if (shuffledIdx >= 0 && shuffledIdx < grid_.totalCells()) {
-                int bitIdx = invPerm_[shuffledIdx];
-                allBytes[bitIdx / 8] |= static_cast<uint8_t>(1 << (7 - (bitIdx % 8)));
-            }
-        }
+        std::vector<uint8_t> allBytes = grid_.mapParticlesToBits(centroids, invPerm_);
 
         if (static_cast<int>(allBytes.size()) < FrameHeader::totalSize) return std::nullopt;
         auto header = FrameHeader::tryParse(allBytes);
@@ -110,18 +92,8 @@ namespace particle_codec {
                 " needs " + std::to_string(count * 2) + " coords but only " +
                 std::to_string(coords.size()) + " were supplied");
         }
-        int byteCount = (grid_.totalCells() + 7) / 8;
-        std::vector<uint8_t> allBytes(byteCount, 0);
-        for (int i = 0; i < count; i++) {
-            double x = coords[i * 2];
-            double y = coords[i * 2 + 1];
-            auto [col, row] = grid_.centerToGrid(x, y);
-            int shuffledIdx = grid_.gridToBitIndex(col, row);
-            if (shuffledIdx >= 0 && shuffledIdx < grid_.totalCells()) {
-                int bitIdx = invPerm_[shuffledIdx];
-                allBytes[bitIdx / 8] |= static_cast<uint8_t>(1 << (7 - (bitIdx % 8)));
-            }
-        }
+
+        std::vector<uint8_t> allBytes = grid_.mapFloatCoordsToBits(coords, count, invPerm_);
 
         if (static_cast<int>(allBytes.size()) < FrameHeader::totalSize) return std::nullopt;
 
@@ -155,16 +127,9 @@ namespace particle_codec {
 
     bool MappingRestorer::validateSyncWord(const std::vector<std::pair<double, double> > &centroids) {
         if (centroids.empty()) return false;
-        int byteCount = (grid_.totalCells() + 7) / 8;
-        std::vector<uint8_t> allBytes(byteCount, 0);
-        for (auto [x, y]: centroids) {
-            auto [col, row] = grid_.centerToGrid(x, y);
-            int shuffledIdx = grid_.gridToBitIndex(col, row);
-            if (shuffledIdx >= 0 && shuffledIdx < grid_.totalCells()) {
-                int bitIdx = invPerm_[shuffledIdx];
-                allBytes[bitIdx / 8] |= static_cast<uint8_t>(1 << (7 - (bitIdx % 8)));
-            }
-        }
+
+        std::vector<uint8_t> allBytes = grid_.mapParticlesToBits(centroids, invPerm_);
+
         if (allBytes.size() < 4) return false;
         return allBytes[0] == 0xAA && allBytes[1] == 0x55 &&
                allBytes[2] == 0xAA && allBytes[3] == 0x55;

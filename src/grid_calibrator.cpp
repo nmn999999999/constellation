@@ -1,4 +1,5 @@
 #include "particle_codec/grid_calibrator.h"
+#include "particle_codec/fast_nn.h"
 #include <algorithm>
 #include <cmath>
 #include <map>
@@ -72,17 +73,11 @@ namespace particle_codec {
         if (n < 16 || gridCols < 2 || gridRows < 2 || toleranceGrid <= 0) return invalid;
 
         // 1) Dominant spacing from nearest-neighbour distances.
+        // Using KD-Tree for O(n log n) performance instead of O(n²)
         std::vector<double> nnDists;
         nnDists.reserve(n);
-        for (int i = 0; i < n; i++) {
-            double best = 1e18;
-            for (int j = 0; j < n; j++) {
-                if (i == j) continue;
-                double d = dist2(centroids[i], centroids[j]);
-                if (d < best) best = d;
-            }
-            nnDists.push_back(std::sqrt(best));
-        }
+        FastNearestNeighbor knn(centroids);
+        nnDists = knn.nearestDistances(centroids);
 
         std::map<int, int> distHist;
         for (double d: nnDists) distHist[static_cast<int>(std::lround(d))]++;
@@ -114,8 +109,9 @@ namespace particle_codec {
                 for (int j = i + 1; j < n; j++) {
                     double dx = centroids[j].first - centroids[i].first;
                     double dy = centroids[j].second - centroids[i].second;
-                    double d = std::sqrt(dx * dx + dy * dy);
-                    if (d < lo || d > hi) continue;
+                    double d2 = dx * dx + dy * dy;
+                    double lo2 = lo * lo, hi2 = hi * hi;
+                    if (d2 < lo2 || d2 > hi2) continue;
                     double ang = angleOf(dx, dy);
                     angHist[static_cast<int>(ang / 3.0) % 60]++;
                     pairVectors.emplace_back(dx, dy);

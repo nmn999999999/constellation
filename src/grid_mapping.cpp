@@ -1,4 +1,4 @@
-﻿#include "particle_codec/grid_mapping.h"
+#include "particle_codec/grid_mapping.h"
 #include <algorithm>
 #include <stdexcept>
 #include <string>
@@ -116,5 +116,74 @@ namespace particle_codec {
         for (int i = offset; i < end; i++)
             value = (value << 8) | bytes[i];
         return value;
+    }
+
+    std::vector<uint8_t> GridMapping::mapParticlesToBits(
+        const std::vector<std::pair<double, double> > &centroids,
+        const std::vector<int> &invPerm) const {
+
+        int totalCells = this->totalCells();
+        int byteCount = (totalCells + 7) / 8;
+        std::vector<uint8_t> allBytes(byteCount, 0);
+
+        for (const auto &[x, y]: centroids) {
+            auto [col, row] = this->centerToGrid(x, y);
+            int shuffledIdx = this->gridToBitIndex(col, row);
+            if (shuffledIdx >= 0 && shuffledIdx < totalCells) {
+                int bitIdx = invPerm[shuffledIdx];
+                int byteIdx = bitIdx >> 3;
+                int bitPos = 7 - (bitIdx & 7);
+                allBytes[byteIdx] |= (1 << bitPos);
+            }
+        }
+
+        return allBytes;
+    }
+
+    std::vector<uint8_t> GridMapping::mapFloatCoordsToBits(
+        const std::vector<float> &coords, int count,
+        const std::vector<int> &invPerm) const {
+
+        int totalCells = this->totalCells();
+        int byteCount = (totalCells + 7) / 8;
+        std::vector<uint8_t> allBytes(byteCount, 0);
+
+        for (int i = 0; i < count; i++) {
+            double x = coords[i * 2];
+            double y = coords[i * 2 + 1];
+            auto [col, row] = this->centerToGrid(x, y);
+            int shuffledIdx = this->gridToBitIndex(col, row);
+            if (shuffledIdx >= 0 && shuffledIdx < totalCells) {
+                int bitIdx = invPerm[shuffledIdx];
+                int byteIdx = bitIdx >> 3;
+                int bitPos = 7 - (bitIdx & 7);
+                allBytes[byteIdx] |= (1 << bitPos);
+            }
+        }
+
+        return allBytes;
+    }
+
+    std::vector<std::pair<double, double> > GridMapping::mapBitsToParticles(
+        const std::vector<uint8_t> &bits, const std::vector<int> &perm) const {
+
+        int totalCells = this->totalCells();
+        std::vector<std::pair<double, double> > out;
+
+        for (int i = 0; i < static_cast<int>(bits.size()); i++) {
+            for (int b = 0; b < 8; b++) {
+                if ((bits[i] >> (7 - b)) & 1) {
+                    int bitIdx = i * 8 + b;
+                    if (bitIdx < totalCells) {
+                        int shuffledIdx = perm[bitIdx];
+                        auto [col, row] = this->bitIndexToGrid(shuffledIdx);
+                        auto [cx, cy] = this->gridToCenter(col, row);
+                        out.emplace_back(cx, cy);
+                    }
+                }
+            }
+        }
+
+        return out;
     }
 } // namespace particle_codec

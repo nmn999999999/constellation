@@ -1,4 +1,4 @@
-﻿#pragma once
+#pragma once
 #include <cstdint>
 #include <utility>
 #include <vector>
@@ -40,5 +40,18 @@ namespace particle_codec {
         static std::vector<uint8_t> intToBytes(int value, int byteCount);
 
         static int bytesToInt(const std::vector<uint8_t> &bytes, int offset = 0, int length = -1);
+
+        // Fast mapping between particles and bits (common in encode/decode)
+        std::vector<uint8_t> mapParticlesToBits(
+            const std::vector<std::pair<double, double> > &centroids,
+            const std::vector<int> &invPerm) const;
+
+        std::vector<std::pair<double, double> > mapBitsToParticles(
+            const std::vector<uint8_t> &bits, const std::vector<int> &perm) const;
+
+        // Float version for compatibility
+        std::vector<uint8_t> mapFloatCoordsToBits(
+            const std::vector<float> &coords, int count,
+            const std::vector<int> &invPerm) const;
     };
 } // namespace particle_codec

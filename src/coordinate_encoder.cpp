@@ -1,4 +1,4 @@
-﻿#include "particle_codec/coordinate_encoder.h"
+#include "particle_codec/coordinate_encoder.h"
 #include <algorithm>
 #include <cmath>
 #include <stdexcept>
@@ -47,6 +47,11 @@ namespace particle_codec {
         return frames;
     }
 
+    std::vector<uint8_t> CoordinateEncoder::mapParticlesToBits(
+        const std::vector<std::pair<double, double> > &centroids) const {
+        return grid_.mapParticlesToBits(centroids, invPerm_);
+    }
+
     EncodedFrame CoordinateEncoder::encodeSingleFrame(const std::vector<uint8_t> &frameData, double time) {
         return encodeFrameInternal(frameData, time);
     }
@@ -91,18 +96,8 @@ namespace particle_codec {
                 std::to_string((grid_.totalCells() + 7) / 8) + "], got " +
                 std::to_string(expectedFrameLength));
         }
-        // Write recovered bits straight into bytes (N bits -> N/8 bytes),
-        // avoiding a full per-bit array.
-        int byteCount = (grid_.totalCells() + 7) / 8;
-        std::vector<uint8_t> allBytes(byteCount, 0);
-        for (auto [x, y]: particles) {
-            auto [col, row] = grid_.centerToGrid(x, y);
-            int shuffledIdx = grid_.gridToBitIndex(col, row);
-            if (shuffledIdx >= 0 && shuffledIdx < grid_.totalCells()) {
-                int bitIdx = invPerm_[shuffledIdx];
-                allBytes[bitIdx / 8] |= static_cast<uint8_t>(1 << (7 - (bitIdx % 8)));
-            }
-        }
+
+        std::vector<uint8_t> allBytes = mapParticlesToBits(particles);
 
         std::vector<uint8_t> result(expectedFrameLength, 0);
         int copyLen = std::min(expectedFrameLength, static_cast<int>(allBytes.size()));
@@ -124,16 +119,7 @@ namespace particle_codec {
             return std::nullopt;
         }
 
-        int byteCount = (grid_.totalCells() + 7) / 8;
-        std::vector<uint8_t> allBytes(byteCount, 0);
-        for (auto [x, y]: particles) {
-            auto [col, row] = grid_.centerToGrid(x, y);
-            int shuffledIdx = grid_.gridToBitIndex(col, row);
-            if (shuffledIdx >= 0 && shuffledIdx < grid_.totalCells()) {
-                int bitIdx = invPerm_[shuffledIdx];
-                allBytes[bitIdx / 8] |= static_cast<uint8_t>(1 << (7 - (bitIdx % 8)));
-            }
-        }
+        std::vector<uint8_t> allBytes = mapParticlesToBits(particles);
 
         if (static_cast<int>(allBytes.size()) < FrameHeader::totalSize) {
             outError = makeError(

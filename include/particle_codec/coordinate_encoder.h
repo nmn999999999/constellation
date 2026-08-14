@@ -1,4 +1,4 @@
-﻿#pragma once
+#pragma once
 #include <cstdint>
 #include <vector>
 #include <memory>
@@ -47,6 +47,10 @@ namespace particle_codec {
         std::unique_ptr<PerlinNoise> noise_;
 
         EncodedFrame encodeFrameInternal(const std::vector<uint8_t> &frameData, double time);
+
+        // Maps particle centroids to recovered frame bytes via the inverse permutation
+        std::vector<uint8_t> mapParticlesToBits(
+            const std::vector<std::pair<double, double> > &centroids) const;
     };
 } // namespace particle_codec
 

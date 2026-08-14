@@ -1,5 +1,6 @@
 #include "particle_codec/homography_calibrator.h"
 #include "particle_codec/grid_calibrator.h"
+#include "particle_codec/fast_nn.h"
 
 #include <algorithm>
 #include <cmath>
@@ -29,11 +30,18 @@ double angleOf(double dx, double dy) {
 }
 
 void matMul(const double A[3][3], const double B[3][3], double C[3][3]) {
-    for (int i = 0; i < 3; i++)
-        for (int j = 0; j < 3; j++) {
-            C[i][j] = 0;
-            for (int k = 0; k < 3; k++) C[i][j] += A[i][k] * B[k][j];
-        }
+    // Manually unrolled 3x3 matrix multiplication for better performance
+    C[0][0] = A[0][0]*B[0][0] + A[0][1]*B[1][0] + A[0][2]*B[2][0];
+    C[0][1] = A[0][0]*B[0][1] + A[0][1]*B[1][1] + A[0][2]*B[2][1];
+    C[0][2] = A[0][0]*B[0][2] + A[0][1]*B[1][2] + A[0][2]*B[2][2];
+
+    C[1][0] = A[1][0]*B[0][0] + A[1][1]*B[1][0] + A[1][2]*B[2][0];
+    C[1][1] = A[1][0]*B[0][1] + A[1][1]*B[1][1] + A[1][2]*B[2][1];
+    C[1][2] = A[1][0]*B[0][2] + A[1][1]*B[1][2] + A[1][2]*B[2][2];
+
+    C[2][0] = A[2][0]*B[0][0] + A[2][1]*B[1][0] + A[2][2]*B[2][0];
+    C[2][1] = A[2][0]*B[0][1] + A[2][1]*B[1][1] + A[2][2]*B[2][1];
+    C[2][2] = A[2][0]*B[0][2] + A[2][1]*B[1][2] + A[2][2]*B[2][2];
 }
 
 // Solve an n x n linear system by Gaussian elimination with partial pivoting.
@@ -181,15 +189,10 @@ int HomographyCalibrator::calibrate(
     if (n < 16 || gridCols < 2 || gridRows < 2) return 0;
 
     // 1) Dominant spacing candidates from the NN-distance histogram.
+    // Using KD-Tree for O(n log n) performance instead of O(n²)
     std::vector<double> nnDists(n);
-    for (int i = 0; i < n; i++) {
-        double best = 1e18;
-        for (int j = 0; j < n; j++) {
-            if (i == j) continue;
-            best = std::min(best, dist2(centroids[i], centroids[j]));
-        }
-        nnDists[i] = std::sqrt(best);
-    }
+    FastNearestNeighbor knn(centroids);
+    nnDists = knn.nearestDistances(centroids);
     std::map<int, int> distHist;
     for (double d : nnDists) distHist[static_cast<int>(std::lround(d))]++;
     std::vector<int> spacingPx;
@@ -202,12 +205,13 @@ int HomographyCalibrator::calibrate(
     auto estimateOrientation = [&](double s, double &theta0) {
         std::vector<int> angHist(60, 0);
         double lo = s * 0.85, hi = s * 1.15;
+        double lo2 = lo * lo, hi2 = hi * hi;
         for (int i = 0; i < n; i++)
             for (int j = i + 1; j < n; j++) {
                 double dx = centroids[j].first - centroids[i].first;
                 double dy = centroids[j].second - centroids[i].second;
-                double d = std::sqrt(dx * dx + dy * dy);
-                if (d < lo || d > hi) continue;
+                double d2 = dx * dx + dy * dy;
+                if (d2 < lo2 || d2 > hi2) continue;
                 angHist[static_cast<int>(angleOf(dx, dy) / 3.0) % 60]++;
             }
         int bestBin = static_cast<int>(
@@ -229,13 +233,17 @@ int HomographyCalibrator::calibrate(
         const std::pair<double, double> v{std::cos(r1), std::sin(r1)};
 
         // 2) Seed: centroid with the most neighbours within 1.45 cells.
+        // Using KD-Tree for O(n log n) performance instead of O(n²)
         int seed = -1, seedCnt = 0;
+        double threshold = 1.45 * 1.45 * s * s;
         for (int i = 0; i < n; i++) {
             int cnt = 0;
-            for (int j = 0; j < n; j++) {
-                if (i == j) continue;
-                if (dist2(centroids[i], centroids[j]) <= 1.45 * 1.45 * s * s)
-                    cnt++;
+            // Count neighbors within threshold using KD-Tree
+            auto neighbors = knn.kNearestNeighbors(centroids, 100);  // Get up to 100 nearest neighbors
+            for (const auto &[dist, idx] : neighbors[i]) {
+                if (idx == i) continue;
+                if (dist <= threshold) cnt++;
+                else break;  // Neighbors are sorted by distance
             }
             if (cnt > seedCnt) {
                 seedCnt = cnt;
