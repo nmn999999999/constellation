@@ -5,6 +5,12 @@ set(CMAKE_CXX_STANDARD 20)
 set(CMAKE_CXX_STANDARD_REQUIRED ON)
 set(CMAKE_MSVC_RUNTIME_LIBRARY "MultiThreaded$<$<CONFIG:Debug>:Debug>")
 
+# <windows.h> defines min/max macros that break std::min/std::max usage
+# (MSVC error C2589). Disable them globally on Windows (MSVC and MinGW).
+if (WIN32)
+    add_compile_definitions(NOMINMAX)
+endif ()
+
 if (MINGW)
     # Single-file executables: statically link the MinGW C++ runtime
     # (libgcc/libstdc++/winpthread) so binaries depend only on the system
