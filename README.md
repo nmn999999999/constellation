@@ -1,30 +1,103 @@
-# Constellation
+# Constellation ✨
 
-*Data hidden in a starfield.*
+**Data hidden in a starfield.**
 
-A visual data encoding system that maps binary data into particle positions on a grid. Data is encoded as the presence
-or absence of particles at specific grid cells, with the grid layout deterministically shuffled based on a fixed
-built-in seed. There is no key or username: the mapping is public, so anyone who has the image can decode it.
+[![CI](https://img.shields.io/github/actions/workflow/status/nmn999999999/constellation/ci.yml?branch=main)](https://github.com/nmn999999999/constellation/actions)
+[![C++17](https://img.shields.io/badge/C%2B%2B-17-blue)](https://en.cppreference.com/w/cpp/17)
+[![License: MIT](https://img.shields.io/badge/license-MIT-green)](LICENSE)
+[![Platform](https://img.shields.io/badge/platform-Windows%20%7C%20Linux%20%7C%20macOS-lightgrey)]()
 
-## How It Works
+> 把二进制数据藏进一片会动的星空 —— **无需任何密钥**，任何人拿到图片或视频帧，都能直接解码出隐藏的消息。
 
-1. **Fixed Seed** — A deterministic seed is derived from a built-in seed input plus the domain via a multi-round hash.
-   The permutation of grid cells is identical for every encoder and decoder, so no username is needed to decode.
-2. **Frame Structure** — Data is split into frames with sync word (0xAA55AA55), sequence number, payload length, and
-   CRC32 checksum.
-3. **Coordinate Encoding** — Each data bit maps to a grid cell via the shuffled permutation. Cells with bit=1 get a
-   particle at their center. Perlin noise adds gentle motion for organic visual effect.
-4. **Decoding** — Particles are detected (from image or coordinate list), their grid positions are reverse-mapped
-   through the inverse permutation, and the original bytes are reconstructed with CRC verification.
-5. **Error Correction** — Optional Hamming (7,4) encoding provides single-bit error correction per 4-bit chunk.
+![Particle field animation](docs/particle_field_demo.gif)
 
-## Project Structure
+*↑ 这段动画的每一帧都藏着一份完整数据（900 字节，带 CRC32 校验）。粒子缓慢漂移，看起来就是一片自然星空。*
+
+---
+
+## 👀 这张图里藏着一句话
+
+![Hidden message sample](docs/hidden_message_sample.png)
+
+上图藏了 **900 字节** 的消息。你肉眼看到的只是"一片星星"，但青色粒子的位置精确对应数据位 —— 解码器从图片中检测粒子、按固定种子逆向映射、通过 CRC 校验，即可还原原始数据。
+
+**粒子特写**（每个粒子 = 一个数据位为 1 的网格单元）：
+
+![Particles closeup](docs/particles_closeup.png)
+
+---
+
+## 🚀 快速开始（30 秒）
+
+```bash
+# 编码：把一条消息编码为粒子帧
+build/codec_demo encode "Hello, Constellation!"
+
+# 解码：从图片中还原隐藏的消息
+build/decode_image image.png 60 60
+```
+
+- **Windows**：从 [Releases](https://github.com/nmn999999999/constellation/releases) 下载免安装的单个 exe
+- **从源码构建**：见下方 [Building](#building)
+
+---
+
+## ✨ 特性
+
+- **无密钥编码** — 网格排列由固定种子确定性生成，任何拿到图的人都能解码（不依赖用户名/密钥）
+- **看起来就是星空** — 青色粒子 + 辉光 + Perlin 噪声漂移，肉眼无法与随机星场区分
+- **CRC32 帧校验** — 检测损坏/篡改
+- **多帧支持** — 大文件自动分帧，带序号追踪
+- **视频冗余** — 每数据帧渲染多帧动画，单帧损坏不影响恢复
+- **Hamming ECC** — 可选单比特纠错，抗噪声信道
+- **照片鲁棒性** — `GridCalibrator` 自动恢复旋转/缩放/平移，`HomographyCalibrator` 处理透视畸变
+- **ML 辅助解码** — 内置 CNN 检测器（`decode_ml`），无需外部 ML 运行时
+- **免 DLL 单文件** — MinGW 静态链接，Windows 上仅依赖系统 DLL
+
+---
+
+## 🧠 How It Works
+
+1. **固定种子** — 从内置种子 + 域派生确定性种子（多轮哈希），生成网格置换。编码器与解码器使用相同的映射，因此无需用户名。
+2. **帧结构** — 数据被分为若干帧：`[sync:4B][seq:2B][len:2B][payload][CRC32:4B]`，sync 字 `0xAA55AA55`。
+3. **坐标编码** — 每个数据位映射到置换后的网格单元；位=1 的单元中心放置一个粒子。Perlin 噪声添加轻微运动，产生自然漂浮效果。
+4. **解码** — 检测粒子（从图片或坐标列表），通过逆置换反向映射网格位置，重建原始字节并做 CRC 验证。
+5. **纠错** — 可选 Hamming (7,4) 编码，每个 4-bit 块提供单比特纠错。
+
+### 渲染参数（viewer 导出）
+
+| 参数 | 值 |
+|------|-----|
+| 导出尺寸 | 480×480 |
+| scale | 8 px/格（60 格） |
+| 粒子半径 | 2 px（核心）+ 4 px 辉光 |
+| 背景 | RGB(10,10,26) 深空蓝 |
+| 粒子色 | 核心 RGB(0,188,212) / 辉光 RGB(0,100,130) |
+
+### 照片与视频鲁棒性（实测，2026-08）
+
+| 场景 | 结果 |
+|------|------|
+| 旋转 | 直接解码 ≤5°，校准后 ≤30° |
+| 缩放 | 0.5 – 1.35× |
+| 平移 | 画面内任意 |
+| 透视 | `HomographyCalibrator`（8 个方向变体） |
+| 高斯模糊 | 半径 ≤ 2.0 |
+| 噪声 | σ ≤ 0.10 |
+| JPEG | 低至 q10 |
+| H.264 视频 | CRF ≤ 38 完整恢复 |
+| VP9/AV1 极压 | ~60 KB / 3.8s 仍完整恢复 |
+
+---
+
+## 📁 Project Structure
 
 ```
 ├── include/particle_codec/      # Public headers
 │   ├── codec.h
 │   ├── error.h                  # ErrorCode / ErrorInfo / Result<T>
 │   ├── grid_calibrator.h        # Affine grid calibration for photographs
+│   ├── homography_calibrator.h  # Perspective (keystone) calibration
 │   ├── frame_builder.h
 │   ├── coordinate_encoder.h
 │   ├── mapping_restorer.h
@@ -34,199 +107,65 @@ built-in seed. There is no key or username: the mapping is public, so anyone who
 │   ├── hamming.h
 │   └── perlin_noise.h
 ├── src/                         # Implementations
-│   ├── codec.cpp
-│   ├── error.cpp
-│   ├── grid_calibrator.cpp
-│   ├── coordinate_encoder.cpp
-│   ├── frame_builder.cpp
-│   ├── frame_parser.cpp
-│   ├── mapping_restorer.cpp
-│   ├── grid_mapping.cpp
-│   ├── pseudo_random.cpp
-│   ├── perlin_noise.cpp
-│   ├── hamming.cpp
-│   └── mingw_compat.cpp        # MinGW static-link shim (Windows)
 ├── demo/
-│   ├── main.cpp                 # Console demo (test/encode/visual modes)
-│   ├── viewer.cpp               # Win32 GUI particle visualization window (MSVC-only)
-│   └── decode_image.cpp         # CLI image decoder (stb_image)
-├── tests/
-│   ├── test_codec.cpp           # 15 unit tests
-│   ├── test_error_safety.cpp    # Validation & error-feedback tests
-│   ├── test_grid_calibrator.cpp # Rotation/scale/shift calibration tests
-│   ├── test_decode_image.cpp    # End-to-end encode/render/decode
-│   ├── test_viewer_decode.cpp   # Viewer-style roundtrip (104/104)
-│   ├── test_viewer_export.cpp   # Export-style roundtrip (128/128)
-│   ├── test_video_generate.cpp  # Multi-frame animation generator (ffmpeg input)
-│   ├── test_video_decode.cpp    # Video-frame decode + multi-frame fusion
-│   └── test_precision.cpp       # Precision benchmark (recall/decode stats)
-├── CMakeLists.txt               # CMake build
-└── README.md
+│   ├── viewer.cpp               # Win32 GUI particle visualization (MSVC-only)
+│   ├── decode_image.cpp         # CLI image decoder (stb_image)
+│   └── decode_ml.cpp            # Hybrid ML decoder (CNN + GridCalibrator)
+├── tests/                       # Unit + end-to-end + video-frame tests
+├── train/                       # ML detector training (PyTorch)
+└── docs/                        # Demo images
 ```
 
-## Requirements
+---
 
-- C++20 compatible compiler
-- CMake 3.16+
+## 🧪 Tests
 
-### Windows
-
-- MinGW-w64 (GCC 11+), e.g. the toolchain bundled with JetBrains CLion
-- MSVC (Visual Studio 2022) is only needed for the Win32 GUI viewer
-
-### Linux / macOS
-
-- GCC 11+ or Clang 14+ (install via your package manager, e.g. `sudo apt install build-essential cmake` or
-  `brew install cmake`)
-
-## Features
-
-- **Open decoding** — No username or secret; anyone who has the image can decode it
-- **Deterministic encoding** — Same data = same particle positions
-- **CRC32 frame verification** — Detects corrupted frames
-- **Multi-frame support** — Splits large data across multiple frames with sequence tracking
-- **Perlin noise animation** — Gentle organic motion makes the particle field feel alive
-- **Hamming error correction** — Optional single-bit correction for noisy channels
-- **Image-based decoding** — Detects particles from RGB/RGBA/grayscale images
-- **60×60 grid default** — ~438 bytes payload per frame (adjustable)
-- **Win32 GUI viewer** — Real-time particle animation window (ESC to close)
-- **Structured error feedback** — Result<T>/ErrorInfo pinpoint the failure stage
-  (no particles / sync / CRC / payload too long); legacy APIs expose it via
-  `ParticleCodec::lastError()`
-- **Fail-fast validation** — invalid grids, >64 KB payloads and out-of-range
-  parameters throw descriptive exceptions instead of corrupting data
-- **Geometry calibration** — automatically recovers rotated, zoomed or shifted
-  photographs by fitting an affine transform to the detected particle grid
-  (`GridCalibrator`); the CLI tries it after the axis-aligned methods fail
-
-## Photographs & Video
-
-The default decode path assumes an axis-aligned, full-frame particle field. If
-the image is a photograph — rotated, zoomed or shifted — `decode_image`
-automatically falls back to `GridCalibrator`, which fits an affine transform
-(rotation + scale + translation) to the detected centroids and tries all four
-orientation variants.
-
-There is also an ML-assisted decoder (`decode_ml`): a small CNN
-(train/detector-only mode, `train/train_detector.py --detector-only`)
-classifies the 60×60 cells on the GridCalibrator-rectified image, replacing
-the color-threshold heuristic for the bitmap. Export the weights with
-`train/export_net.py`, then `build\decode_ml.exe photo.png particle_detector.bin`.
-A pretrained detector (20 epochs / 5000 frames, 100% validation bit-acc) is
-included at `models/particle_detector.bin`; copy it next to the exe (or pass
-its path) and decode right away. The CNN inference is hand-written C++ (no
-external ML runtime), keeping the single-file, no-DLL build.
-
-### Measured decode limits (hybrid decoder, 2026-08-13)
-
-Tested on a 480×480 synthetic field with a 60-px margin around the 360×360
-particle field (i.e. the whole field stays inside the frame):
-
-| Factor | Pass | Fail |
-|---|---|---|
-| Rotation | up to 30° | 35°+ |
-| Scale | 0.5 – 1.35× | 1.4× (field cropped out of frame) |
-| Translation | up to the frame margin (60 px) | beyond margin (field cropped) |
-| Perspective tilt | ~0 (affine pipeline) | any keystone breaks the affine fit; the new homography calibrator (`HomographyCalibrator`) is a best-effort fallback (unit-tested, end-to-end still WIP) |
-| Gaussian blur | radius ≤ 2.0 | 3.0+ |
-| Noise (σ) | ≤ 0.10 | 0.15+ |
-| Brightness | 0.55× – 1.5× | 0.4× |
-| JPEG quality | down to q10 | — |
-| Color shift (R/B gain) | down to 0.55 | — |
-
-Combined worst case (rotation 4° + scale 0.9 + shift 30 px + blur 1.0 +
-noise σ0.05 + JPEG q40) decodes correctly. The dominant limit is **field
-visibility**: any transform that crops particles out of the frame loses
-information physically and cannot be recovered by any decoder.
-
-Video adds redundancy: `test_video_generate` renders a multi-frame animation
-(Perlin drift, optional crossfade and Hamming ECC), `ffmpeg` composes it into a
-video, and `test_video_decode` decodes every frame, locks the global geometry
-from the first calibrated frame, fuses per-sequence centroids (majority
-voting), re-calibrates the averaged set, and falls back to ECC correction.
-
-Measured robustness (480×480@30 fps): H.264 CRF ≤ 38 (~127 kb/s) decodes
-completely; VP9/AV1 recover the full payload even at ~60 KB for a 3.8-second
-video; a 90%-zoomed video with black borders recovers 96/114 frames and the
-entire payload via calibration + fusion. Rotated fields are recovered by
-multi-frame fusion: intensity-weighted centroids, bundle-adjustment over all
-frames, majority voting, and a CRC-guided single/double bit repair that fixes
-the last 1–2 residual cell errors.
-
-## Related Work
-
-Constellation belongs to the "dot-pattern" family of visual data encoding, but as of 2026 it has few direct
-counterparts on GitHub:
-
-- **Matrix codes (QR, Data Matrix, Aztec)** — the closest mainstream relative: data is encoded by the presence or
-  absence of cells on a fixed grid and decoded deterministically. Unlike Constellation they are explicit,
-  machine-readable barcodes rather than a concealable visual medium.
-- **Dot-pattern steganography research (DPCES)** — academic schemes map characters to randomized dot patterns
-  (e.g. *A Randomized Dot Pattern Character Encoding Scheme*, 2023). Conceptually adjacent, but they operate as
-  character-substitution tables without frame structure, CRC verification, or image-based blob decoding.
-- **Point-cloud / 3D steganography** (e.g. [GS-Hider](https://github.com/xuanyuzhang21/GS-Hider), NeurIPS 2024) —
-  hides messages in 3D Gaussian-splatting point clouds, sharing the "data lives in point positions" idea in a 3D
-  domain.
-- **Mainstream image steganography** ([OpenStego](https://github.com/syvaidya/openstego), StegHide, LSB tools,
-  [StegaStamp](https://github.com/tancik/StegaStamp)) — alter pixel values or learn a robust encoding; the carrier is
-  a natural image rather than an aesthetic particle field.
-
-What distinguishes Constellation: the carrier *is* the message — a deterministic, key-free particle field that anyone
-can decode from the image alone, with CRC32 frame verification and optional Hamming error correction.
-
-## Error Handling
-
-Data-dependent failures are reported through `particle_codec::Result<T>` /
-`ErrorInfo` with a stage-specific code (`NoParticles`, `SyncNotFound`,
-`PayloadTooLong`, `CrcMismatch`, `FrameDuplicate`, `BufferOverflow`, ...). The
-legacy `std::optional`-returning APIs keep their signatures and expose the
-reason via `ParticleCodec::lastError()`.
-
-Programmer errors fail fast with descriptive exceptions: invalid grid
-dimensions (`std::invalid_argument`), payloads larger than the 16-bit frame
-length field (`std::length_error`), and out-of-range byte/chunk parameters
-(`std::out_of_range`).
-
-The `decode_image` CLI prints per-method diagnostics on failure (particle
-counts and the stage where each method broke) and uses distinct exit codes:
-`0` decoded, `1` usage/argument error, `2` I/O error, `3` decode failed,
-`4` internal error.
-
-## License
-
-[MIT](LICENSE) — free to use, modify and distribute, including commercially;
-just keep the copyright notice.
-
-## Building & Running
-
-### CMake (all platforms)
+全部测试在 4 平台 CI（Linux GCC/Clang、macOS Clang、Windows MSVC）上通过：
 
 ```bash
-cmake -B build -S .
-cmake --build build
-
-# Console roundtrip test
-build/codec_demo            # build\codec_demo.exe on Windows
-
-# Run unit tests
-build/codec_test                # core unit tests
-build/error_safety_test         # validation & error-feedback tests
-build/test_grid_calibrator      # geometry calibration tests
-
-# CLI image decoder
-# Tries color/DT detection first, then automatic geometry calibration.
-build/decode_image image.png [grid_cols] [grid_rows]
-
-# Multi-frame video pipeline (requires ffmpeg)
-build/test_video_generate build/video_test/anim 1752 6
-ffmpeg -framerate 30 -i build/video_test/anim/anim_%03d.bmp \
-       -c:v libx264 -pix_fmt yuv420p -crf 23 build/video_test/video.mp4
-ffmpeg -i build/video_test/video.mp4 -fps_mode vfr \
-       build/video_test/frames/f_%03d.png
-build/test_video_decode build/video_test/frames build/video_test/payload.bin
+build/codec_test.exe          # 15+ core unit tests
+build/error_safety_test.exe   # validation & error-feedback tests
+build/test_grid_calibrator.exe# geometry calibration (rotate/scale/shift)
+build/test_homography.exe     # perspective calibration
+build/test_decode_image.exe   # end-to-end encode/render/decode
+build/test_viewer_decode.exe  # viewer-style roundtrip (104/104)
+build/test_viewer_export.exe  # 480×480 export-style roundtrip
+build/test_precision.exe      # precision benchmark
+build/test_video_decode.exe   # video-frame decode + multi-frame fusion
 ```
 
-On Windows the project is built with MinGW (e.g. the toolchain bundled with JetBrains CLion) plus CMake/Ninja. The C++
-runtime and winpthread are linked statically, so the executables are single files that depend only on system DLLs
-(KERNEL32.dll, msvcrt.dll; GDI32/USER32 for the GDI test) and run on stock Windows without any extra files. The Win32
-GUI viewer (`demo/viewer.cpp`) is MSVC-only and is not built by CMake.
+---
+
+## 🛠 Building
+
+### Requirements
+
+- C++17 compatible compiler (GCC 11+ / Clang 14+ / MSVC 2022)
+- CMake 3.16+
+
+```bash
+cmake -S . -B build -G Ninja -DCMAKE_BUILD_TYPE=Release
+cmake --build build
+```
+
+- **Linux/macOS**: `g++` / `clang++`
+- **Windows**: MinGW（单文件免 DLL）或 MSVC
+
+---
+
+## 📚 Related Work
+
+Constellation belongs to the "dot-pattern" family of visual data encoding:
+
+- **Matrix codes (QR, Data Matrix, Aztec)** — closest mainstream relative: data encoded by presence/absence of cells on a fixed grid, decoded deterministically. Unlike Constellation they are explicit barcodes rather than a concealable visual medium.
+- **Dot-pattern steganography research (DPCES)** — academic schemes map characters to randomized dot patterns, but without frame structure, CRC verification, or image-based blob decoding.
+- **Point-cloud / 3D steganography** (e.g. [GS-Hider](https://github.com/xuanyuzhang21/GS-Hider), NeurIPS 2024) — hides messages in 3D Gaussian-splatting point clouds.
+- **Mainstream image steganography** ([OpenStego](https://github.com/syvaidya/openstego), StegHide, [StegaStamp](https://github.com/tancik/StegaStamp)) — alter pixel values or learn a robust encoding; the carrier is a natural image rather than an aesthetic particle field.
+
+What distinguishes Constellation: **the carrier *is* the message** — a deterministic, key-free particle field that anyone can decode from the image alone, with CRC32 frame verification and optional Hamming error correction.
+
+---
+
+## 📜 License
+
+[MIT](LICENSE) — free to use, modify and distribute, including commercially; just keep the copyright notice.
