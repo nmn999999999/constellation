@@ -1,4 +1,4 @@
-﻿// Multi-frame animation generator: encodes a large payload into multiple data
+// Multi-frame animation generator: encodes a large payload into multiple data
 // frames, renders each one at several animation times (Perlin drift), and
 // writes an export-style BMP sequence suitable for ffmpeg video composition.
 //
@@ -147,7 +147,9 @@ static std::pair<double, double> drift_offset(const PerlinNoise &noise,
 // per-cell size/brightness for the star-chart look.
 
 // Build the draw list of a pure frame: every particle sits at its irregular
-// cell centre plus the continuous Perlin drift (full brightness).
+// cell centre plus the continuous Perlin drift. Size and brightness follow
+// the nebula field, so bright large stars cluster where the cloud is dense
+// and dim small stars scatter elsewhere — no lattice regularity.
 static std::vector<DrawParticle> build_frame(const EncodedFrame &frame, double t,
                                              const PerlinNoise &noise) {
     std::vector<DrawParticle> out;
@@ -159,8 +161,11 @@ static std::vector<DrawParticle> build_frame(const EncodedFrame &frame, double t
         auto [dx, dy] = drift_offset(noise, col, row, t, i);
         double px = std::clamp(x + dx, col + 0.4, col + 0.6);
         double py = std::clamp(y + dy, row + 0.4, row + 0.6);
-        double size = 0.7 + cell_random(col, row, 3) * 0.6;
-        double bright = 0.6 + cell_random(col, row, 4) * 0.4;
+        // Nebula magnitude: high in star-cloud bands, low in the voids.
+        double mag = 0.5 + 0.5 * noise.fbm(col * 0.05 + t * 0.02,
+                                           row * 0.05, 2); // [0,1]
+        double size = 0.6 + mag * 0.8;
+        double bright = 0.55 + mag * 0.45;
         out.push_back({px * kScale, py * kScale, 1.0, size, bright});
     }
     return out;
@@ -205,8 +210,10 @@ static std::vector<DrawParticle> build_morph(const EncodedFrame &frameA,
         const std::pair<double, double> &pa = kv.second;
         auto cr = gridColRow(pa.first, pa.second);
         auto [dx, dy] = drift_offset(noise, cr.first, cr.second, t, idx);
-        double size = 0.7 + cell_random(cr.first, cr.second, 3) * 0.6;
-        double bright = 0.6 + cell_random(cr.first, cr.second, 4) * 0.4;
+        double mag = 0.5 + 0.5 * noise.fbm(cr.first * 0.05 + t * 0.02,
+                                           cr.second * 0.05, 2);
+        double size = 0.6 + mag * 0.8;
+        double bright = 0.55 + mag * 0.45;
         auto it = posB.find(idx);
         if (it != posB.end()) {
             // Common particle: the irregular cell centre is identical in A and
@@ -231,8 +238,10 @@ static std::vector<DrawParticle> build_morph(const EncodedFrame &frameA,
         const std::pair<double, double> &pb = kv.second;
         auto cr = gridColRow(pb.first, pb.second);
         auto [dx, dy] = drift_offset(noise, cr.first, cr.second, t, idx);
-        double size = 0.7 + cell_random(cr.first, cr.second, 3) * 0.6;
-        double bright = 0.6 + cell_random(cr.first, cr.second, 4) * 0.4;
+        double mag = 0.5 + 0.5 * noise.fbm(cr.first * 0.05 + t * 0.02,
+                                           cr.second * 0.05, 2);
+        double size = 0.6 + mag * 0.8;
+        double bright = 0.55 + mag * 0.45;
         double ang = hash_angle(idx + 7);
         double d = driftPx * (1.0 - morphT);
         double bx = pb.first - std::cos(ang) * d;
@@ -244,132 +253,195 @@ static std::vector<DrawParticle> build_morph(const EncodedFrame &frameA,
     return out;
 }
 
-// Unified renderer: draws a particle list (brightness scaled by alpha) plus
-// `markerCount` corner markers, then exports a 24-bit BMP.
+// ---- Pure-pixel nebula renderer (no GDI) --------------------------------
+// A fully procedural star-chart look: a Perlin cloud background in deep
+// blue-violet, soft radial-gradient star halos whose brightness follows the
+// same nebula field (bright star clusters where the cloud is dense, dim
+// scattered stars elsewhere), plus density-modulated decorative dust. Only
+// the bright cyan cores satisfy is_cyan() (R<80, G>100, B>100, B>R+20,
+// G>R+20), so decoding is unaffected.
+
+static inline uint8_t mix8(int bg, int target, double a) {
+    return static_cast<uint8_t>(bg + (target - bg) * a);
+}
+
+// Background: a low-frequency Perlin cloud sampled every 4 px, bilinearly
+// interpolated to full resolution, so the field reads as a nebula instead of
+// a flat black canvas. Colour is deep blue-violet, never cyan (G stays low).
+static void paint_nebula_background(std::vector<uint8_t> &px,
+                                    const PerlinNoise &noise, double t) {
+    const int step = 4;
+    const int gw = kExportW / step + 1, gh = kExportH / step + 1;
+    std::vector<float> cloud(gw * gh);
+    for (int gy = 0; gy < gh; gy++) {
+        for (int gx = 0; gx < gw; gx++) {
+            double cx = (gx * step) / kScale;
+            double cy = (gy * step) / kScale;
+            double n1 = noise.fbm(cx * 0.045 + t * 0.008, cy * 0.045, 2);
+            double n2 = noise.fbm(cx * 0.16 + 9.3, cy * 0.16 + 2.7, 2);
+            cloud[gy * gw + gx] = static_cast<float>(n1 * 0.65 + n2 * 0.35);
+        }
+    }
+    for (int y = 0; y < kExportH; y++) {
+        double fy = static_cast<double>(y) / step;
+        int gy0 = static_cast<int>(fy);
+        double ty = fy - gy0;
+        for (int x = 0; x < kExportW; x++) {
+            double fx = static_cast<double>(x) / step;
+            int gx0 = static_cast<int>(fx);
+            double tx = fx - gx0;
+            auto sample = [&](int gxi, int gyi) {
+                gxi = std::clamp(gxi, 0, gw - 1);
+                gyi = std::clamp(gyi, 0, gh - 1);
+                return cloud[gyi * gw + gxi];
+            };
+            float v00 = sample(gx0, gy0), v10 = sample(gx0 + 1, gy0);
+            float v01 = sample(gx0, gy0 + 1), v11 = sample(gx0 + 1, gy0 + 1);
+            float v = (v00 * (1 - tx) + v10 * tx) * (1 - ty) +
+                      (v01 * (1 - tx) + v11 * tx) * ty;
+            double k = v * 0.5 + 0.5; // [0,1]
+            int idx = (y * kExportW + x) * 3;
+            px[idx] = mix8(4, 30, k);
+            px[idx + 1] = mix8(4, 18, k);
+            px[idx + 2] = mix8(15, 64, k);
+        }
+    }
+}
+
+// Soft radial-gradient halo: non-cyan blue-violet, fades into the background
+// so neighbouring halos blend into a continuous nebula glow.
+static void draw_halo(std::vector<uint8_t> &px, int cx, int cy,
+                      double size, double bright, double alpha) {
+    int gr = static_cast<int>(6.5 * size) + 2;
+    for (int dy = -gr; dy <= gr; dy++) {
+        for (int dx = -gr; dx <= gr; dx++) {
+            int x = cx + dx, y = cy + dy;
+            if (x < 0 || x >= kExportW || y < 0 || y >= kExportH) continue;
+            double d = std::sqrt(dx * dx + dy * dy);
+            if (d > gr) continue;
+            double fade = 1.0 - d / gr;
+            double a = alpha * fade * fade;
+            int idx = (y * kExportW + x) * 3;
+            if (d < gr * 0.45) { // inner blue glow
+                px[idx] = mix8(px[idx], 0, a);
+                px[idx + 1] = mix8(px[idx + 1], 62, a);
+                px[idx + 2] = mix8(px[idx + 2], 118, a);
+            } else {             // outer violet haze
+                px[idx] = mix8(px[idx], 34, a);
+                px[idx + 1] = mix8(px[idx + 1], 20, a);
+                px[idx + 2] = mix8(px[idx + 2], 74, a);
+            }
+        }
+    }
+}
+
+// Bright cyan core (the scanner's detection target). A symmetric filled disc
+// so the detected centroid lands exactly on the centre; brightness modulated
+// by the nebula field (G always stays > 100 so every star is resolvable).
+static void draw_core(std::vector<uint8_t> &px, int cx, int cy,
+                      double bright, double alpha) {
+    const int cr = 2;
+    int g = mix8(0, 185, bright);
+    int b = mix8(0, 212, bright);
+    for (int dy = -cr; dy <= cr; dy++) {
+        for (int dx = -cr; dx <= cr; dx++) {
+            if (dx * dx + dy * dy > cr * cr + 1) continue;
+            int x = cx + dx, y = cy + dy;
+            if (x < 0 || x >= kExportW || y < 0 || y >= kExportH) continue;
+            int idx = (y * kExportW + x) * 3;
+            px[idx] = mix8(px[idx], 0, alpha);
+            px[idx + 1] = mix8(px[idx + 1], g, alpha);
+            px[idx + 2] = mix8(px[idx + 2], b, alpha);
+        }
+    }
+}
+
+// Unified renderer: procedural nebula background, decorative dust, star
+// halos+cores, corner markers, then a 24-bit BMP.
 static void render_to_bmp(const std::vector<DrawParticle> &particles,
-                          int markerCount, const std::string &path) {
-    HDC hdc = GetDC(nullptr);
-    HDC memDc = CreateCompatibleDC(hdc);
-    HBITMAP bmp = CreateCompatibleBitmap(hdc, kExportW, kExportH);
-    SelectObject(memDc, bmp);
+                          int markerCount, const std::string &path,
+                          const PerlinNoise &noise, double t) {
+    std::vector<uint8_t> px(kExportW * kExportH * 3);
+    paint_nebula_background(px, noise, t);
 
-    HBRUSH bg = CreateSolidBrush(RGB(10, 10, 26));
-    RECT fr = {0, 0, kExportW, kExportH};
-    FillRect(memDc, &fr, bg);
-    DeleteObject(bg);
-
-    auto oldBrush = SelectObject(memDc, GetStockObject(DC_BRUSH));
-    auto oldPen = SelectObject(memDc, GetStockObject(NULL_PEN));
-
-    // Star chart look: halo/glow scale with the star's size, colour/brightness
-    // with its magnitude. Only the bright core satisfies the scanner's
-    // is_cyan() threshold (R<80, G>100, B>100, B>R+20, G>R+20); the halo and
-    // mid-glow are deliberately non-cyan so they never register as particles.
-    const int pr = 2; // bright cyan core (GDI fills ~4px, resolvable by scanner)
-
-    auto mix = [](int bg, int target, double a) {
-        return static_cast<int>(bg + (target - bg) * a);
-    };
-
-    // Two-pass drawing so no core is ever covered by a neighbour's halo:
-    // pass 0 draws decorative dust (non-cyan), pass 1 draws every halo/glow,
-    // pass 2 draws every bright core on top.
-    // NOTE: GDI Ellipse treats the right/bottom edge as exclusive, so the
-    // drawn disc is centred 0.5px up-left of the given centre; +1 on x2/y2
-    // compensates so the detected centroid lands exactly on (sx, sy).
-    // Decorative dust: faint blue-grey specks, G stays far below 100 so they
-    // never register as cyan particles. They hide the lattice regularity.
+    // Decorative dust: faint blue-grey specks, G stays far below 100.
     for (const auto &p : particles) {
         if (!p.isDust) continue;
         int sx = static_cast<int>(p.sx) + kMargin;
         int sy = static_cast<int>(p.sy) + kMargin;
-        int r = std::max(1, static_cast<int>(p.size));
-        double b = p.alpha * p.bright;
-        SetDCBrushColor(memDc, RGB(mix(10, 40, b),
-                                   mix(10, 52, b),
-                                   mix(10, 92, b)));
-        Ellipse(memDc, sx - r, sy - r, sx + r + 1, sy + r + 1);
+        int r = 1;
+        double a = p.alpha * p.bright * 0.55;
+        for (int dy = -r; dy <= r; dy++)
+            for (int dx = -r; dx <= r; dx++) {
+                if (dx * dx + dy * dy > r * r) continue;
+                int x = sx + dx, y = sy + dy;
+                if (x < 0 || x >= kExportW || y < 0 || y >= kExportH) continue;
+                int idx = (y * kExportW + x) * 3;
+                px[idx] = mix8(px[idx], 34, a);
+                px[idx + 1] = mix8(px[idx + 1], 42, a);
+                px[idx + 2] = mix8(px[idx + 2], 76, a);
+            }
     }
+    // Star halos (data particles).
     for (const auto &p : particles) {
         if (p.isDust) continue;
         int sx = static_cast<int>(p.sx) + kMargin;
         int sy = static_cast<int>(p.sy) + kMargin;
-        int grOuter = static_cast<int>(5.5 * p.size) + 2; // 5..9
-        int grMid = static_cast<int>(2.8 * p.size) + 1;   // 2..4
-        double b = p.alpha * p.bright;
-
-        // Outer halo: faint blue-violet, NOT cyan (G stays < 100).
-        SetDCBrushColor(memDc, RGB(mix(10, 26, b),
-                                   mix(10, 40, b),
-                                   mix(10, 86, b)));
-        Ellipse(memDc, sx - grOuter, sy - grOuter,
-                sx + grOuter + 1, sy + grOuter + 1);
-
-        // Mid glow: blue, still NOT cyan (G <= 100 at full brightness).
-        SetDCBrushColor(memDc, RGB(mix(10, 0, b),
-                                   mix(10, 90, b),
-                                   mix(10, 128, b)));
-        Ellipse(memDc, sx - grMid, sy - grMid,
-                sx + grMid + 1, sy + grMid + 1);
+        draw_halo(px, sx, sy, p.size, p.bright, p.alpha);
     }
+    // Cores on top (never covered by halos).
     for (const auto &p : particles) {
         if (p.isDust) continue;
         int sx = static_cast<int>(p.sx) + kMargin;
         int sy = static_cast<int>(p.sy) + kMargin;
-        // Bright cyan core (what the scanner detects), fixed full brightness.
-        SetDCBrushColor(memDc, RGB(0, 190, 215));
-        Ellipse(memDc, sx - pr, sy - pr, sx + pr + 1, sy + pr + 1);
+        draw_core(px, sx, sy, p.bright, p.alpha);
     }
 
-    // Corner markers: bright purple squares inside the black margin, so they
-    // never overlap particles. Marked frames are scannable.
+    // Corner markers: bright purple squares inside the black margin.
     if (markerCount > 0) {
-        HBRUSH markerBrush = CreateSolidBrush(RGB(kMarkerR, kMarkerG, kMarkerB));
-        auto oldM = SelectObject(memDc, markerBrush);
         const int corners[4][2] = {
             {kMarkerInset, kMarkerInset},                       // TL
             {kExportW - kMarkerInset - kMarkerSize, kMarkerInset}, // TR
             {kMarkerInset, kExportH - kMarkerInset - kMarkerSize}, // BL
             {kExportW - kMarkerInset - kMarkerSize, kExportH - kMarkerInset - kMarkerSize}, // BR
         };
-        for (int c = 0; c < markerCount && c < 4; c++)
-            Rectangle(memDc, corners[c][0], corners[c][1],
-                      corners[c][0] + kMarkerSize, corners[c][1] + kMarkerSize);
-        SelectObject(memDc, oldM);
-        DeleteObject(markerBrush);
+        for (int c = 0; c < markerCount && c < 4; c++) {
+            for (int dy = 0; dy < kMarkerSize; dy++)
+                for (int dx = 0; dx < kMarkerSize; dx++) {
+                    int x = corners[c][0] + dx, y = corners[c][1] + dy;
+                    int idx = (y * kExportW + x) * 3;
+                    px[idx] = kMarkerR;
+                    px[idx + 1] = kMarkerG;
+                    px[idx + 2] = kMarkerB;
+                }
+        }
     }
 
-    SelectObject(memDc, oldBrush);
-    SelectObject(memDc, oldPen);
-
-    BITMAPINFO bi = {};
-    bi.bmiHeader.biSize = sizeof(bi.bmiHeader);
-    bi.bmiHeader.biWidth = kExportW;
-    bi.bmiHeader.biHeight = -kExportH;
-    bi.bmiHeader.biPlanes = 1;
-    bi.bmiHeader.biBitCount = 24;
-    bi.bmiHeader.biCompression = BI_RGB;
-
-    DWORD size = ((kExportW * 3 + 3) / 4) * 4 * kExportH;
-    std::vector<uint8_t> pixels(size);
-    GetDIBits(memDc, bmp, 0, kExportH, pixels.data(), &bi, DIB_RGB_COLORS);
-
+    // Write 24-bit BMP (pixel storage is BGR, our buffer is RGB -> swap).
+    std::vector<uint8_t> bmpData(px.size());
+    for (size_t i = 0; i < px.size(); i += 3) {
+        bmpData[i] = px[i + 2];     // B
+        bmpData[i + 1] = px[i + 1]; // G
+        bmpData[i + 2] = px[i];     // R
+    }
     BITMAPFILEHEADER bfh = {};
     bfh.bfType = 0x4D42;
-    bfh.bfSize = 54 + size;
+    bfh.bfSize = 54 + static_cast<DWORD>(bmpData.size());
     bfh.bfOffBits = 54;
-
     FILE *f = fopen(path.c_str(), "wb");
     if (f) {
         fwrite(&bfh, 1, sizeof(bfh), f);
-        fwrite(&bi.bmiHeader, 1, sizeof(bi.bmiHeader), f);
-        fwrite(pixels.data(), 1, size, f);
+        BITMAPINFOHEADER bih = {};
+        bih.biSize = sizeof(bih);
+        bih.biWidth = kExportW;
+        bih.biHeight = -kExportH;
+        bih.biPlanes = 1;
+        bih.biBitCount = 24;
+        bih.biCompression = BI_RGB;
+        fwrite(&bih, 1, sizeof(bih), f);
+        fwrite(bmpData.data(), 1, bmpData.size(), f);
         fclose(f);
     }
-
-    DeleteObject(bmp);
-    DeleteDC(memDc);
-    ReleaseDC(nullptr, hdc);
 }
 
 int main(int argc, char *argv[]) {
@@ -476,7 +548,7 @@ int main(int argc, char *argv[]) {
             char name[64];
             std::snprintf(name, sizeof(name), "anim_%03d.bmp", totalAnim);
             render_to_bmp(withDust(build_frame(frame, t, driftNoise), t),
-                          kMarkerCountFull, outDir + "/" + name);
+                          kMarkerCountFull, outDir + "/" + name, driftNoise, t);
 
             if (meta) {
                 std::fprintf(meta, "%03d scannable seq=%zu particles=%d t=%.2f\n",
@@ -497,7 +569,7 @@ int main(int argc, char *argv[]) {
                 std::snprintf(name, sizeof(name), "anim_%03d.bmp", totalAnim);
                 // Transition frames carry no markers -> scanner skips them.
                 render_to_bmp(withDust(build_morph(frameA, frameB, t, morphT, driftNoise), t), 0,
-                              outDir + "/" + name);
+                              outDir + "/" + name, driftNoise, t);
 
                 if (meta) {
                     std::fprintf(meta, "%03d morph %zu->%zu morphT=%.3f t=%.2f\n",
