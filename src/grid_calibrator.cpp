@@ -101,8 +101,10 @@ namespace particle_codec {
 
             // 2) Orientation histogram over near-neighbour pairs.
             // Window excludes diagonal pairs (1.41x spacing) so the histogram
-            // peaks at the true grid axes, not the diagonals.
-            const double lo = s * 0.85, hi = s * 1.15;
+            // peaks at the true grid axes, not the diagonals. Wider than the
+            // old 0.85-1.15 so irregular centre offsets (±0.2 cell) keep the
+            // near pairs inside the window.
+            const double lo = s * 0.7, hi = s * 1.3;
             std::vector<int> angHist(60, 0); // 3-degree bins over 180
             std::vector<std::pair<double, double> > pairVectors;
             for (int i = 0; i < n; i++) {
@@ -165,7 +167,10 @@ namespace particle_codec {
             const int anchorCount = std::min(8, static_cast<int>(anchors.size()));
 
             for (double ss = s * 0.80; ss <= s * 1.25; ss += 0.03) {
-                for (double th = theta0 - 1.8; th <= theta0 + 1.8; th += 0.1) {
+                // Wide angle sweep: irregular cell centres widen the
+                // orientation peak by up to ~±11°, so the coarse 3° bins can
+                // land the initial theta0 several degrees off.
+                for (double th = theta0 - 6.0; th <= theta0 + 6.0; th += 0.1) {
                     double rr0 = th * kPi / 180.0;
                     double rr1 = (th + 90.0) * kPi / 180.0;
                     std::pair<double, double> uf{std::cos(rr0) * ss, std::sin(rr0) * ss};

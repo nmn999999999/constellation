@@ -5,7 +5,8 @@
 namespace particle_codec {
     MappingRestorer::MappingRestorer(const std::vector<uint8_t> &seed, int gridCols, int gridRows)
         : gridCols_(gridCols), gridRows_(gridRows),
-          grid_(gridCols, gridRows) {
+          grid_(gridCols, gridRows, 1.0, 1.0, /*useMicroOffset=*/false,
+                /*irregularCenters=*/true) {
         PseudoRandom prng(seed);
         auto perm = prng.permutation(grid_.totalCells());
         invPerm_ = PseudoRandom::inversePermutation(perm);

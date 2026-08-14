@@ -10,10 +10,16 @@ namespace particle_codec {
         double cellWidth;
         double cellHeight;
         bool useMicroOffset;
+        // When true, each cell's centre is shifted to a deterministic
+        // pseudo-random spot inside the cell ([0.3, 0.7] of the cell), so the
+        // encoded particle field reads as a natural star chart instead of a
+        // regular lattice. Decoding still works with plain floor() because the
+        // offset is always < 1 cell.
+        bool irregularCenters;
 
         // Throws std::invalid_argument unless cols >= 1 and rows >= 1.
         GridMapping(int cols = 60, int rows = 60, double cellWidth = 1.0, double cellHeight = 1.0,
-                    bool useMicroOffset = false);
+                    bool useMicroOffset = false, bool irregularCenters = false);
 
         int totalCells() const { return cols * rows; }
         int bitsPerCell() const { return useMicroOffset ? 2 : 1; }

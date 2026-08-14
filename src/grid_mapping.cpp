@@ -5,8 +5,24 @@
 #include <cmath>
 
 namespace particle_codec {
-    GridMapping::GridMapping(int cols, int rows, double cellWidth, double cellHeight, bool useMicroOffset)
-        : cols(cols), rows(rows), cellWidth(cellWidth), cellHeight(cellHeight), useMicroOffset(useMicroOffset) {
+    namespace {
+        // Deterministic pseudo-random value in [0,1] for a grid cell (used for
+        // the irregular centre offset). Fixed for all codec instances so
+        // encoder and decoder always agree.
+        static double cellHash01(int col, int row, int salt) {
+            unsigned int h = static_cast<unsigned int>(col * 374761393u) ^
+                             static_cast<unsigned int>(row * 668265263u) ^
+                             static_cast<unsigned int>(salt * 1274126177u);
+            h = (h ^ (h >> 13)) * 1274126177u;
+            h ^= h >> 16;
+            return (h & 0xFFFFF) / 1048575.0;
+        }
+    }
+
+    GridMapping::GridMapping(int cols, int rows, double cellWidth, double cellHeight,
+                             bool useMicroOffset, bool irregularCenters)
+        : cols(cols), rows(rows), cellWidth(cellWidth), cellHeight(cellHeight),
+          useMicroOffset(useMicroOffset), irregularCenters(irregularCenters) {
         if (cols < 1 || rows < 1) {
             throw std::invalid_argument(
                 "GridMapping: grid dimensions must be positive, got " +
@@ -23,7 +39,18 @@ namespace particle_codec {
     }
 
     std::pair<double, double> GridMapping::gridToCenter(int col, int row) const {
-        return {col * cellWidth + cellWidth * 0.5, row * cellHeight + cellHeight * 0.5};
+        if (!irregularCenters) {
+            return {col * cellWidth + cellWidth * 0.5,
+                    row * cellHeight + cellHeight * 0.5};
+        }
+        // Natural star chart: each centre sits at a deterministic spot inside
+        // its cell (0.4..0.6), so the field never looks like a lattice. The
+        // offset stays well below 1 cell, so plain floor() recovers the cell,
+        // and small enough (±0.1 cell) that geometry calibration keeps its
+        // tolerance assumptions.
+        double ox = 0.4 + cellHash01(col, row, 1) * 0.2;
+        double oy = 0.4 + cellHash01(col, row, 2) * 0.2;
+        return {(col + ox) * cellWidth, (row + oy) * cellHeight};
     }
 
     std::pair<int, int> GridMapping::centerToGrid(double x, double y) const {

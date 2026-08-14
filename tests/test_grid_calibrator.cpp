@@ -4,6 +4,7 @@
 #include <cmath>
 #include <iostream>
 #include <random>
+#include <map>
 #include <string>
 #include <vector>
 
@@ -155,3 +156,4 @@ int main() {
     std::cout << "\nAll grid calibrator tests passed!\n";
     return 0;
 }
+

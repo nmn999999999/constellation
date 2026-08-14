@@ -1,4 +1,4 @@
-// Multi-frame animation generator: encodes a large payload into multiple data
+﻿// Multi-frame animation generator: encodes a large payload into multiple data
 // frames, renders each one at several animation times (Perlin drift), and
 // writes an export-style BMP sequence suitable for ffmpeg video composition.
 //
@@ -60,7 +60,39 @@ struct DrawParticle {
     double alpha;  // 0..1 brightness (fade)
     double size = 1.0;   // glow scale multiplier (big star / small star)
     double bright = 1.0; // core brightness 0..1 (bright star / dim star)
+    bool isDust = false; // decorative non-cyan speck (never detected)
 };
+
+// Decorative star dust: sprinkled at fully random positions with Perlin-
+// modulated density, so the field reads as a natural, uneven star chart
+// instead of a lattice. Dust is painted with non-cyan colours, so it never
+// registers as a particle and decoding is unaffected.
+static std::vector<DrawParticle> build_dust(const PerlinNoise &noise, double t,
+                                            std::mt19937 &rng) {
+    std::vector<DrawParticle> dust;
+    std::uniform_real_distribution<double> u01(0.0, 1.0);
+    // ~2200 candidate specks; density kept by the Perlin gate below.
+    const int candidates = 2200;
+    dust.reserve(candidates);
+    for (int i = 0; i < candidates; i++) {
+        double px = u01(rng) * kGridCols; // grid coords, fully random
+        double py = u01(rng) * kGridRows;
+        // Density field: speckles cluster where the noise is high.
+        double dens = noise.fbm(px * 0.12 + t * 0.06, py * 0.12, 2);
+        if (dens < 0.25) continue; // sparse regions
+        double size = 0.5 + u01(rng) * 0.7;   // 0.5..1.2 (faint dust vs dots)
+        double bright = 0.25 + u01(rng) * 0.5; // 0.25..0.75 (very dim)
+        DrawParticle d;
+        d.sx = px * kScale;
+        d.sy = py * kScale;
+        d.alpha = 1.0;
+        d.size = size;
+        d.bright = bright;
+        d.isDust = true;
+        dust.push_back(d);
+    }
+    return dust;
+}
 
 // Deterministic per-cell pseudo-random value in [0,1]; different salt gives
 // independent values (used for star position offset, size and brightness).
@@ -85,8 +117,8 @@ static double hash_angle(int idx) {
 // slow low-frequency Perlin path (like drifting nebula gas), plus a tiny
 // per-particle wander for organic liveliness. Because the shared global flow
 // keeps every particle's *relative* spacing unchanged, neighbouring cores can
-// never merge 鈥?the scanner always resolves all particles.
-// Offset budget vs cell: global 卤2.0px + local 卤0.4px + codec jitter 卤0.96px
+// never merge 閳?the scanner always resolves all particles.
+// Offset budget vs cell: global 鍗?.0px + local 鍗?.4px + codec jitter 鍗?.96px
 // = max ~3.36px < 4px (half cell), so floor() mapping stays correct and every
 // scannable frame decodes directly (fusion only as a fallback).
 static const double kLocalAmp = 0.4 / kScale;   // per-particle micro-wander (px)
@@ -109,21 +141,13 @@ static std::pair<double, double> drift_offset(const PerlinNoise &noise,
 // Corner markers live in the black margin (outside the grid), so particles of
 // the outermost cells can drift freely without ever being hidden.
 
-// Star chart placement: a particle sits at a pseudo-random spot inside its own
-// grid cell (not the centre), so the field looks like a natural star chart
-// instead of a regular lattice. floor() decoding stays exact because the
-// offset is clamped to [0.3, 0.7] inside the cell; combined with the 2px core
-// (4px diameter) the nearest neighbours can never merge (min spacing
-// 0.6 cell = 4.8px > 4px). Size and brightness also vary per cell for
-// bright/dim, large/small stars.
-static std::pair<double, double> star_spot(int col, int row) {
-    double ox = 0.3 + cell_random(col, row, 1) * 0.4; // [0.3, 0.7]
-    double oy = 0.3 + cell_random(col, row, 2) * 0.4;
-    return {ox, oy};
-}
+// The codec itself now places every particle at a deterministic irregular
+// centre inside its cell (GridMapping::irregularCenters). This renderer just
+// adds the Perlin drift (clamped inside the cell so floor() stays exact) and
+// per-cell size/brightness for the star-chart look.
 
-// Build the draw list of a pure frame: every particle sits at its star-chart
-// spot plus the continuous Perlin drift (full brightness).
+// Build the draw list of a pure frame: every particle sits at its irregular
+// cell centre plus the continuous Perlin drift (full brightness).
 static std::vector<DrawParticle> build_frame(const EncodedFrame &frame, double t,
                                              const PerlinNoise &noise) {
     std::vector<DrawParticle> out;
@@ -132,10 +156,9 @@ static std::vector<DrawParticle> build_frame(const EncodedFrame &frame, double t
         double x = frame.particles[i * 2], y = frame.particles[i * 2 + 1];
         int col = static_cast<int>(std::floor(x));
         int row = static_cast<int>(std::floor(y));
-        auto [ox, oy] = star_spot(col, row);
         auto [dx, dy] = drift_offset(noise, col, row, t, i);
-        double px = std::clamp(col + ox + dx, col + 0.3, col + 0.7);
-        double py = std::clamp(row + oy + dy, row + 0.3, row + 0.7);
+        double px = std::clamp(x + dx, col + 0.4, col + 0.6);
+        double py = std::clamp(y + dy, row + 0.4, row + 0.6);
         double size = 0.7 + cell_random(col, row, 3) * 0.6;
         double bright = 0.6 + cell_random(col, row, 4) * 0.4;
         out.push_back({px * kScale, py * kScale, 1.0, size, bright});
@@ -176,31 +199,26 @@ static std::vector<DrawParticle> build_morph(const EncodedFrame &frameA,
     std::vector<DrawParticle> out;
     out.reserve(std::max(posA.size(), posB.size()));
 
-    auto spot = [](int col, int row) { return star_spot(col, row); };
-
     // Particles present in A: common ones ease to B, A-only ones fade+drift out.
     for (const auto &kv : posA) {
         const int idx = kv.first;
         const std::pair<double, double> &pa = kv.second;
         auto cr = gridColRow(pa.first, pa.second);
-        auto [ox, oy] = star_spot(cr.first, cr.second);
         auto [dx, dy] = drift_offset(noise, cr.first, cr.second, t, idx);
         double size = 0.7 + cell_random(cr.first, cr.second, 3) * 0.6;
         double bright = 0.6 + cell_random(cr.first, cr.second, 4) * 0.4;
         auto it = posB.find(idx);
         if (it != posB.end()) {
-            // Common particle: layout (star spot) of A and B is identical for
-            // the same cell, so the spot is stable; drift still animates it.
-            double bx = cr.first + ox;
-            double by = cr.second + oy;
-            double px = std::clamp(bx + dx, cr.first + 0.3, cr.first + 0.7);
-            double py = std::clamp(by + dy, cr.second + 0.3, cr.second + 0.7);
+            // Common particle: the irregular cell centre is identical in A and
+            // B for the same cell, so the spot is stable; drift animates it.
+            double px = std::clamp(pa.first + dx, cr.first + 0.4, cr.first + 0.6);
+            double py = std::clamp(pa.second + dy, cr.second + 0.4, cr.second + 0.6);
             out.push_back({px * kScale, py * kScale, 1.0, size, bright});
         } else {
             double ang = hash_angle(idx);
             double d = driftPx * morphT;
-            double bx = cr.first + ox + std::cos(ang) * d;
-            double by = cr.second + oy + std::sin(ang) * d;
+            double bx = pa.first + std::cos(ang) * d;
+            double by = pa.second + std::sin(ang) * d;
             double px = std::clamp(bx + dx, cr.first + 0.2, cr.first + 0.8);
             double py = std::clamp(by + dy, cr.second + 0.2, cr.second + 0.8);
             out.push_back({px * kScale, py * kScale, 1.0 - morphT, size, bright});
@@ -212,14 +230,13 @@ static std::vector<DrawParticle> build_morph(const EncodedFrame &frameA,
         if (posA.count(idx)) continue;
         const std::pair<double, double> &pb = kv.second;
         auto cr = gridColRow(pb.first, pb.second);
-        auto [ox, oy] = star_spot(cr.first, cr.second);
         auto [dx, dy] = drift_offset(noise, cr.first, cr.second, t, idx);
         double size = 0.7 + cell_random(cr.first, cr.second, 3) * 0.6;
         double bright = 0.6 + cell_random(cr.first, cr.second, 4) * 0.4;
         double ang = hash_angle(idx + 7);
         double d = driftPx * (1.0 - morphT);
-        double bx = cr.first + ox - std::cos(ang) * d;
-        double by = cr.second + oy - std::sin(ang) * d;
+        double bx = pb.first - std::cos(ang) * d;
+        double by = pb.second - std::sin(ang) * d;
         double px = std::clamp(bx + dx, cr.first + 0.2, cr.first + 0.8);
         double py = std::clamp(by + dy, cr.second + 0.2, cr.second + 0.8);
         out.push_back({px * kScale, py * kScale, morphT, size, bright});
@@ -255,11 +272,26 @@ static void render_to_bmp(const std::vector<DrawParticle> &particles,
     };
 
     // Two-pass drawing so no core is ever covered by a neighbour's halo:
-    // pass 1 draws every halo/glow, pass 2 draws every bright core on top.
+    // pass 0 draws decorative dust (non-cyan), pass 1 draws every halo/glow,
+    // pass 2 draws every bright core on top.
     // NOTE: GDI Ellipse treats the right/bottom edge as exclusive, so the
     // drawn disc is centred 0.5px up-left of the given centre; +1 on x2/y2
     // compensates so the detected centroid lands exactly on (sx, sy).
+    // Decorative dust: faint blue-grey specks, G stays far below 100 so they
+    // never register as cyan particles. They hide the lattice regularity.
     for (const auto &p : particles) {
+        if (!p.isDust) continue;
+        int sx = static_cast<int>(p.sx) + kMargin;
+        int sy = static_cast<int>(p.sy) + kMargin;
+        int r = std::max(1, static_cast<int>(p.size));
+        double b = p.alpha * p.bright;
+        SetDCBrushColor(memDc, RGB(mix(10, 40, b),
+                                   mix(10, 52, b),
+                                   mix(10, 92, b)));
+        Ellipse(memDc, sx - r, sy - r, sx + r + 1, sy + r + 1);
+    }
+    for (const auto &p : particles) {
+        if (p.isDust) continue;
         int sx = static_cast<int>(p.sx) + kMargin;
         int sy = static_cast<int>(p.sy) + kMargin;
         int grOuter = static_cast<int>(5.5 * p.size) + 2; // 5..9
@@ -281,6 +313,7 @@ static void render_to_bmp(const std::vector<DrawParticle> &particles,
                 sx + grMid + 1, sy + grMid + 1);
     }
     for (const auto &p : particles) {
+        if (p.isDust) continue;
         int sx = static_cast<int>(p.sx) + kMargin;
         int sy = static_cast<int>(p.sy) + kMargin;
         // Bright cyan core (what the scanner detects), fixed full brightness.
@@ -425,6 +458,14 @@ int main(int argc, char *argv[]) {
     // Dedicated Perlin field for the visible drift animation.
     auto noiseSeed = PseudoRandom::deriveSeed("particle_codec_drift", "video_gen");
     PerlinNoise driftNoise(noiseSeed);
+    // Merge decorative star dust (fixed seed -> stable positions; the Perlin
+    // density field still breathes with t so the dust clusters shift slowly).
+    auto withDust = [&](std::vector<DrawParticle> stars, double t) {
+        std::mt19937 rng(42);
+        auto dust = build_dust(driftNoise, t, rng);
+        stars.insert(stars.end(), dust.begin(), dust.end());
+        return stars;
+    };
     FILE *meta = fopen((outDir + "/anim_meta.txt").c_str(), "w");
     for (size_t d = 0; d < frameBytesList.size(); d++) {
         int pureFrames = kAnimFramesPerDataFrame - transition;
@@ -434,8 +475,8 @@ int main(int argc, char *argv[]) {
 
             char name[64];
             std::snprintf(name, sizeof(name), "anim_%03d.bmp", totalAnim);
-            render_to_bmp(build_frame(frame, t, driftNoise), kMarkerCountFull,
-                          outDir + "/" + name);
+            render_to_bmp(withDust(build_frame(frame, t, driftNoise), t),
+                          kMarkerCountFull, outDir + "/" + name);
 
             if (meta) {
                 std::fprintf(meta, "%03d scannable seq=%zu particles=%d t=%.2f\n",
@@ -455,7 +496,7 @@ int main(int argc, char *argv[]) {
                 char name[64];
                 std::snprintf(name, sizeof(name), "anim_%03d.bmp", totalAnim);
                 // Transition frames carry no markers -> scanner skips them.
-                render_to_bmp(build_morph(frameA, frameB, t, morphT, driftNoise), 0,
+                render_to_bmp(withDust(build_morph(frameA, frameB, t, morphT, driftNoise), t), 0,
                               outDir + "/" + name);
 
                 if (meta) {
@@ -474,4 +515,5 @@ int main(int argc, char *argv[]) {
               << outDir << "/../constellation.mp4" << std::endl;
     return 0;
 }
+
 

@@ -8,7 +8,7 @@ namespace particle_codec {
     CoordinateEncoder::CoordinateEncoder(const std::vector<uint8_t> &seed, int gridCols, int gridRows,
                                          bool useMicroOffset)
         : gridCols_(gridCols), gridRows_(gridRows), useMicroOffset_(useMicroOffset),
-          grid_(gridCols, gridRows, 1.0, 1.0, useMicroOffset),
+          grid_(gridCols, gridRows, 1.0, 1.0, useMicroOffset, /*irregularCenters=*/true),
           prng_(seed) {
         perm_ = prng_.permutation(grid_.totalCells());
         invPerm_ = PseudoRandom::inversePermutation(perm_);

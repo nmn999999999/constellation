@@ -48,7 +48,7 @@ namespace particle_codec {
         // field is too small, too sparse, or has no dominant spacing.
         static Affine calibrate(const std::vector<std::pair<double, double> > &centroids,
                                 int gridCols, int gridRows,
-                                double toleranceGrid = 0.30);
+                                double toleranceGrid = 0.35);
 
         // calibrate() then map every centroid to canonical grid coordinates.
         static std::vector<std::pair<double, double> > calibrateAndMap(
