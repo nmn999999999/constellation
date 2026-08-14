@@ -17,15 +17,15 @@ jobs:
         include:
           - name: Linux (GCC)
             os: ubuntu-latest
-            compiler: gcc
+            compiler: g++
             exe_suffix: ""
           - name: Linux (Clang)
             os: ubuntu-latest
-            compiler: clang
+            compiler: clang++
             exe_suffix: ""
           - name: macOS (Clang)
             os: macos-latest
-            compiler: clang
+            compiler: clang++
             exe_suffix: ""
           - name: Windows (MSVC)
             os: windows-latest
@@ -44,13 +44,17 @@ jobs:
       if: runner.os == 'macOS'
       run: brew install cmake ninja
 
+    - name: Set up MSVC environment
+      if: runner.os == 'Windows'
+      uses: ilammy/msvc-dev-cmd@v1
+
     - name: Configure (Unix-like)
       if: runner.os != 'Windows'
       run: cmake -S . -B build -G Ninja -DCMAKE_BUILD_TYPE=Release -DCMAKE_CXX_COMPILER=${{ matrix.compiler }}
 
     - name: Configure (Windows MSVC)
       if: runner.os == 'Windows'
-      run: cmake -S . -B build -G "Visual Studio 17 2022" -A x64
+      run: cmake -S . -B build -G Ninja -DCMAKE_BUILD_TYPE=Release
 
     - name: Build
       run: cmake --build build --config Release
@@ -58,11 +62,9 @@ jobs:
     - name: Run unit tests
       shell: bash
       run: |
-        if [ "$RUNNER_OS" = "Windows" ]; then
-          test_dir="build/Release"
-        else
-          test_dir="build"
-        fi
+        # Single-config Ninja build puts executables directly in build/ on
+        # every platform (including Windows with MSVC).
+        test_dir="build"
         # Note: Windows-only tests (BMP rendering via <windows.h>) are only
         # built on Windows; portable tests run on every platform.
         for exe in "$test_dir"/*_test${{ matrix.exe_suffix }}; do
@@ -75,11 +77,7 @@ jobs:
     - name: "Run video-frame decode test (no frames: skipped)"
       shell: bash
       run: |
-        if [ "$RUNNER_OS" = "Windows" ]; then
-          test_dir="build/Release"
-        else
-          test_dir="build"
-        fi
+        test_dir="build"
         if [ -f "$test_dir/test_video_decode${{ matrix.exe_suffix }}" ]; then
           "$test_dir/test_video_decode${{ matrix.exe_suffix }}" \
             || echo "test_video_decode skipped (no frame directory supplied)"
@@ -91,7 +89,6 @@ jobs:
         name: decode_image-${{ matrix.os }}-${{ matrix.compiler }}
         path: |
           build/decode_image${{ matrix.exe_suffix }}
-          build/Release/decode_image${{ matrix.exe_suffix }}
         retention-days: 7
         if-no-files-found: warn
 
