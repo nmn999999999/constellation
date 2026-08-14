@@ -1,4 +1,4 @@
-﻿// Multi-frame animation generator: encodes a large payload into multiple data
+// Multi-frame animation generator: encodes a large payload into multiple data
 // frames, renders each one at several animation times (Perlin drift), and
 // writes an export-style BMP sequence suitable for ffmpeg video composition.
 //
@@ -254,17 +254,31 @@ static std::vector<DrawParticle> build_morph(const EncodedFrame &frameA,
 
 int main(int argc, char *argv[]) {
     std::string outDir = (argc > 1) ? argv[1] : "build/video_test/anim";
-    int payloadBytes = (argc > 2) ? std::atoi(argv[2]) : 1200;
+    int payloadBytes = (argc > 2) ? std::atoi(argv[2]) : -1;
     int transition = (argc > 3) ? std::atoi(argv[3]) : 0;
     bool eccMode = (argc > 4) && (std::string(argv[4]) == "ecc");
 
-    if (payloadBytes <= 0) {
-        std::cerr << "Error: payload_bytes must be positive" << std::endl;
-        return 1;
-    }
     if (transition < 0 || transition >= kAnimFramesPerDataFrame) {
         std::cerr << "Error: transition_frames must be in [0, "
                   << kAnimFramesPerDataFrame - 1 << "]" << std::endl;
+        return 1;
+    }
+
+    // Keep the same seed/domain the decoder will use.
+    std::string domain = "particle_codec";
+    auto seed = PseudoRandom::deriveSeed("demo_user", domain);
+    CoordinateEncoder encoder(seed, kGridCols, kGridRows);
+
+    int chunkSize = encoder.maxPayloadBytes();
+    if (payloadBytes < 0) {
+        // Default to 3 full chunks so every data frame carries a similar
+        // particle count (otherwise the final short frame looks sparse).
+        payloadBytes = chunkSize * 3;
+        std::cout << "Default payload: " << payloadBytes << " bytes ("
+                  << chunkSize << " x 3, uniform per-frame density)" << std::endl;
+    }
+    if (payloadBytes <= 0) {
+        std::cerr << "Error: payload_bytes must be positive" << std::endl;
         return 1;
     }
 
@@ -296,13 +310,6 @@ int main(int argc, char *argv[]) {
         std::cout << "ECC: Hamming (7,4) enabled, framed payload "
                   << framedData.size() << " bytes" << std::endl;
     }
-
-    // Keep the same seed/domain the decoder will use.
-    std::string domain = "particle_codec";
-    auto seed = PseudoRandom::deriveSeed("demo_user", domain);
-    CoordinateEncoder encoder(seed, kGridCols, kGridRows);
-
-    int chunkSize = encoder.maxPayloadBytes();
     std::vector<std::vector<uint8_t> > frameBytesList;
     for (int offset = 0; offset < static_cast<int>(framedData.size()); offset += chunkSize) {
         int end = std::min(offset + chunkSize, static_cast<int>(framedData.size()));
