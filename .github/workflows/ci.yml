@@ -72,7 +72,7 @@ jobs:
           fi
         done
 
-    - name: Run video-frame decode test (no frames: skipped)
+    - name: "Run video-frame decode test (no frames: skipped)"
       shell: bash
       run: |
         if [ "$RUNNER_OS" = "Windows" ]; then
