@@ -1,4 +1,4 @@
-﻿// Video-frame decoder: loads a directory of PNG/BMP frames extracted from a
+// Video-frame decoder: loads a directory of PNG/BMP frames extracted from a
 // video, detects particles, decodes each frame, assembles the multi-frame
 // payload and (optionally) verifies it against the original payload.bin.
 //
@@ -14,6 +14,11 @@
 #include <map>
 #include <unordered_map>
 #include <cstdio>
+
+#define NOMINMAX
+#ifdef _WIN32
+#include <windows.h>
+#endif
 
 #define STB_IMAGE_IMPLEMENTATION
 #include "../demo/stb_image.h"
@@ -97,6 +102,30 @@ static std::vector<std::pair<double, double> > direct_grid(
     return gp;
 }
 
+// Corner-marker detection: the generator draws a 4x4 bright-purple square near
+// each corner of scannable frames (transition/morph frames have none). Purple
+// is intentionally not cyan, so it never registers as a particle. Returns the
+// number of corners carrying a marker (0..4).
+static int detect_corner_markers(const unsigned char *img, int w, int h) {
+    auto cornerHas = [&](int x0, int y0) {
+        int purple = 0;
+        for (int dy = 0; dy < 5 && y0 + dy < h; dy++)
+            for (int dx = 0; dx < 5 && x0 + dx < w; dx++) {
+                const unsigned char *p = img + ((y0 + dy) * w + (x0 + dx)) * 3;
+                // bright purple: high R, high B, low G, clearly red-shifted
+                if (p[0] > 140 && p[2] > 140 && p[1] < 110 && p[0] > p[1] + 60)
+                    purple++;
+            }
+        return purple >= 4; // at least 4 purple pixels inside the 5x5 window
+    };
+    int n = 0;
+    if (cornerHas(1, 1)) n++;
+    if (cornerHas(w - 5, 1)) n++;
+    if (cornerHas(1, h - 5)) n++;
+    if (cornerHas(w - 5, h - 5)) n++;
+    return n;
+}
+
 int main(int argc, char *argv[]) {
     if (argc < 2) {
         std::cerr << "Usage: test_video_decode.exe <frame_dir> [payload.bin]" << std::endl;
@@ -121,12 +150,28 @@ int main(int argc, char *argv[]) {
     GridCalibrator::Affine globalMap;
     bool haveGlobalMap = false;
 
+    // List image files with FindFirstFileA (ANSI) instead of
+    // std::filesystem::directory_iterator: the latter throws on non-ASCII
+    // (e.g. Chinese) paths because of its narrow->wide conversion.
     std::vector<std::string> files;
-    for (const auto &entry: std::filesystem::directory_iterator(dir)) {
-        auto ext = entry.path().extension().string();
-        std::transform(ext.begin(), ext.end(), ext.begin(), ::tolower);
-        if (ext == ".png" || ext == ".bmp" || ext == ".jpg" || ext == ".jpeg") {
-            files.push_back(entry.path().string());
+    {
+        std::string pattern = dir;
+        if (!pattern.empty() && pattern.back() != '\\' && pattern.back() != '/')
+            pattern += '\\';
+        pattern += '*';
+        WIN32_FIND_DATAA fd;
+        HANDLE hFind = FindFirstFileA(pattern.c_str(), &fd);
+        if (hFind != INVALID_HANDLE_VALUE) {
+            do {
+                std::string name(fd.cFileName);
+                std::string ext = name.size() >= 4 ? name.substr(name.size() - 4) : "";
+                std::transform(ext.begin(), ext.end(), ext.begin(), ::tolower);
+                if (ext == ".png" || ext == ".bmp" || ext == ".jpg" || ext == ".jpeg" ||
+                    (name.size() >= 5 && name.substr(name.size() - 5) == ".jpeg")) {
+                    files.push_back(dir + "\\" + name);
+                }
+            } while (FindNextFileA(hFind, &fd));
+            FindClose(hFind);
         }
     }
     std::sort(files.begin(), files.end());
@@ -138,6 +183,8 @@ int main(int argc, char *argv[]) {
     int calibratedFrames = 0;  // decoded only after geometry calibration
     int freshAdds = 0;         // first successful add for a data-frame seq
     int failFrames = 0;        // frames that could not be decoded at all
+    int scannableFrames = 0;   // frames carrying full corner markers
+    int skippedMorphFrames = 0;// transition/morph frames skipped by markers
     std::vector<int> seqSuccess(64, 0); // data-frame success counts
     std::vector<std::string> failByStage;
     int globalW = 0, globalH = 0; // image size of the first loaded frame
@@ -154,6 +201,19 @@ int main(int argc, char *argv[]) {
             globalW = w;
             globalH = h;
         }
+
+        // Scannable-frame gating: the generator marks pure data frames with 4
+        // corner markers and leaves morph transitions unmarked. Only grab
+        // frames with >= 3 markers (allowing one corner lost to compression);
+        // everything else is a transition and is skipped automatically.
+        int markers = detect_corner_markers(img, w, h);
+        if (markers < 3) {
+            stbi_image_free(img);
+            skippedMorphFrames++;
+            failByStage.push_back("morph-skipped");
+            continue;
+        }
+        scannableFrames++;
 
         int total = w * h;
         std::vector<uint8_t> mask(total, 0);
@@ -297,6 +357,11 @@ int main(int argc, char *argv[]) {
         }
     }
 
+    std::cout << "Scannable frames (4 corner markers): " << scannableFrames
+              << " / " << files.size() << std::endl;
+    if (skippedMorphFrames > 0)
+        std::cout << "Morph/transition frames skipped automatically: "
+                  << skippedMorphFrames << std::endl;
     std::cout << "Frames decoded successfully: " << decodedFrames
               << " / " << files.size()
               << " (fresh data-frame adds: " << freshAdds << ")" << std::endl;
