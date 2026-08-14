@@ -60,40 +60,67 @@ static double hash_angle(int idx) {
     return static_cast<double>(h % 3600) / 10.0 * 3.14159265358979323846 / 180.0;
 }
 
-// Build the draw list of a pure frame (every particle at full brightness).
-static std::vector<DrawParticle> build_frame(const EncodedFrame &frame) {
+// Perlin drift: every particle floats continuously inside its own grid cell
+// with an independent phase, so the whole field looks like drifting star dust
+// even on pure (scannable) frames. Amplitude 0.35 grid units (~2.8 px) is
+// clearly visible yet stays safely inside the cell (±0.5) for the decoder.
+static const double kDriftAmp = 0.35;
+
+static std::pair<double, double> drift_offset(const PerlinNoise &noise,
+                                              int col, int row,
+                                              double t, int phase) {
+    double nx = noise.fbm(col * 0.05 + t * 0.15, row * 0.05 + phase * 0.13, 3);
+    double ny = noise.fbm(col * 0.05 + phase * 0.13 + 7.7,
+                          row * 0.05 + t * 0.15, 3);
+    return {nx * kDriftAmp, ny * kDriftAmp};
+}
+
+// Build the draw list of a pure frame: every particle sits at its grid
+// position plus the continuous Perlin drift (full brightness).
+static std::vector<DrawParticle> build_frame(const EncodedFrame &frame, double t,
+                                             const PerlinNoise &noise) {
     std::vector<DrawParticle> out;
     out.reserve(static_cast<size_t>(frame.particleCount));
     for (int i = 0; i < frame.particleCount; i++) {
-        out.push_back({frame.particles[i * 2] * kScale,
-                       frame.particles[i * 2 + 1] * kScale, 1.0});
+        double x = frame.particles[i * 2], y = frame.particles[i * 2 + 1];
+        int col = static_cast<int>(std::floor(x));
+        int row = static_cast<int>(std::floor(y));
+        auto [dx, dy] = drift_offset(noise, col, row, t, i);
+        out.push_back({(x + dx) * kScale, (y + dy) * kScale, 1.0});
     }
     return out;
 }
 
-// Build the draw list of a morph between frame A (t=0) and frame B (t=1).
+// Build the draw list of a morph between frame A (morphT=0) and frame B
+// (morphT=1). Layout eases between the two grids while every particle keeps
+// floating with the continuous Perlin drift:
 //   * cells in both frames: particle eases from A to B position, alpha 1
-//   * cells only in A: particle drifts away and fades out (alpha 1-t)
-//   * cells only in B: particle drifts in and fades in (alpha t)
+//   * cells only in A: particle drifts away and fades out (alpha 1-morphT)
+//   * cells only in B: particle drifts in and fades in (alpha morphT)
 static std::vector<DrawParticle> build_morph(const EncodedFrame &frameA,
                                              const EncodedFrame &frameB,
-                                             double t) {
+                                             double t, double morphT,
+                                             const PerlinNoise &noise) {
     auto gridIdx = [](double x, double y) {
         int col = static_cast<int>(std::floor(x));
         int row = static_cast<int>(std::floor(y));
         return row * kGridCols + col;
     };
+    auto gridColRow = [](double x, double y) {
+        return std::make_pair(static_cast<int>(std::floor(x)),
+                              static_cast<int>(std::floor(y)));
+    };
     std::unordered_map<int, std::pair<double, double> > posA, posB;
     for (int i = 0; i < frameA.particleCount; i++) {
         double x = frameA.particles[i * 2], y = frameA.particles[i * 2 + 1];
-        posA[gridIdx(x, y)] = {x * kScale, y * kScale};
+        posA[gridIdx(x, y)] = {x, y};
     }
     for (int i = 0; i < frameB.particleCount; i++) {
         double x = frameB.particles[i * 2], y = frameB.particles[i * 2 + 1];
-        posB[gridIdx(x, y)] = {x * kScale, y * kScale};
+        posB[gridIdx(x, y)] = {x, y};
     }
 
-    const double driftPx = 4.0; // pixels a particle drifts while fading
+    const double driftPx = 4.0 / kScale; // grid units a particle drifts while fading
     std::vector<DrawParticle> out;
     out.reserve(std::max(posA.size(), posB.size()));
 
@@ -101,16 +128,19 @@ static std::vector<DrawParticle> build_morph(const EncodedFrame &frameA,
     for (const auto &kv : posA) {
         const int idx = kv.first;
         const std::pair<double, double> &pa = kv.second;
+        auto cr = gridColRow(pa.first, pa.second);
+        auto [ox, oy] = drift_offset(noise, cr.first, cr.second, t, idx);
         auto it = posB.find(idx);
         if (it != posB.end()) {
-            double dx = it->second.first - pa.first;
-            double dy = it->second.second - pa.second;
-            out.push_back({pa.first + dx * t, pa.second + dy * t, 1.0});
+            double bx = pa.first + (it->second.first - pa.first) * morphT;
+            double by = pa.second + (it->second.second - pa.second) * morphT;
+            out.push_back({(bx + ox) * kScale, (by + oy) * kScale, 1.0});
         } else {
             double ang = hash_angle(idx);
-            double d = driftPx * t;
-            out.push_back({pa.first + std::cos(ang) * d,
-                           pa.second + std::sin(ang) * d, 1.0 - t});
+            double d = driftPx * morphT;
+            out.push_back({(pa.first + std::cos(ang) * d + ox) * kScale,
+                           (pa.second + std::sin(ang) * d + oy) * kScale,
+                           1.0 - morphT});
         }
     }
     // Particles only in B: fade in while drifting in from the drift distance.
@@ -118,10 +148,13 @@ static std::vector<DrawParticle> build_morph(const EncodedFrame &frameA,
         const int idx = kv.first;
         if (posA.count(idx)) continue;
         const std::pair<double, double> &pb = kv.second;
+        auto cr = gridColRow(pb.first, pb.second);
+        auto [ox, oy] = drift_offset(noise, cr.first, cr.second, t, idx);
         double ang = hash_angle(idx + 7);
-        double d = driftPx * (1.0 - t);
-        out.push_back({pb.first - std::cos(ang) * d,
-                       pb.second - std::sin(ang) * d, t});
+        double d = driftPx * (1.0 - morphT);
+        out.push_back({(pb.first - std::cos(ang) * d + ox) * kScale,
+                       (pb.second - std::sin(ang) * d + oy) * kScale,
+                       morphT});
     }
     return out;
 }
@@ -296,6 +329,9 @@ int main(int argc, char *argv[]) {
     }
 
     int totalAnim = 0;
+    // Dedicated Perlin field for the visible drift animation.
+    auto noiseSeed = PseudoRandom::deriveSeed("particle_codec_drift", "video_gen");
+    PerlinNoise driftNoise(noiseSeed);
     FILE *meta = fopen((outDir + "/anim_meta.txt").c_str(), "w");
     for (size_t d = 0; d < frameBytesList.size(); d++) {
         int pureFrames = kAnimFramesPerDataFrame - transition;
@@ -305,7 +341,8 @@ int main(int argc, char *argv[]) {
 
             char name[64];
             std::snprintf(name, sizeof(name), "anim_%03d.bmp", totalAnim);
-            render_to_bmp(build_frame(frame), kMarkerCountFull, outDir + "/" + name);
+            render_to_bmp(build_frame(frame, t, driftNoise), kMarkerCountFull,
+                          outDir + "/" + name);
 
             if (meta) {
                 std::fprintf(meta, "%03d scannable seq=%zu particles=%d t=%.2f\n",
@@ -325,7 +362,7 @@ int main(int argc, char *argv[]) {
                 char name[64];
                 std::snprintf(name, sizeof(name), "anim_%03d.bmp", totalAnim);
                 // Transition frames carry no markers -> scanner skips them.
-                render_to_bmp(build_morph(frameA, frameB, morphT), 0,
+                render_to_bmp(build_morph(frameA, frameB, t, morphT, driftNoise), 0,
                               outDir + "/" + name);
 
                 if (meta) {
