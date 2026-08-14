@@ -9,9 +9,9 @@
 
 > 把二进制数据藏进一片会动的星空 —— **无需任何密钥**，任何人拿到图片或视频帧，都能直接解码出隐藏的消息。
 
-![Particle field animation](docs/particle_field_demo.gif)
+![Particle field animation](docs/particle_field_morph.gif)
 
-*↑ 这段动画的每一帧都藏着一份完整数据（900 字节，带 CRC32 校验）。粒子缓慢漂移，看起来就是一片自然星空。*
+*↑ 连续无停顿的粒子动画：粒子在数据帧之间平滑流动（morph 过渡）。标记帧（4 角有紫色标记）可扫描，过渡帧由扫描器自动跳过。*
 
 ---
 
