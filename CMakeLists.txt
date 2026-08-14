@@ -70,26 +70,31 @@ target_link_libraries(decode_image PRIVATE particle_codec ${MINGW_PTHREAD_LINK})
 add_executable(decode_ml demo/decode_ml.cpp ${MINGW_COMPAT_SRC})
 target_link_libraries(decode_ml PRIVATE particle_codec ${MINGW_PTHREAD_LINK})
 
-# Standalone end-to-end tests (Windows, render BMP then decode)
-add_executable(test_decode_image tests/test_decode_image.cpp ${MINGW_COMPAT_SRC})
-target_link_libraries(test_decode_image PRIVATE particle_codec ${MINGW_PTHREAD_LINK})
+# Windows-only standalone tests: they use the Win32 BITMAPFILEHEADER struct
+# (via <windows.h>) to render BMPs, so they are not portable to Linux/macOS.
+if (WIN32)
+    # Standalone end-to-end tests (render BMP then decode)
+    add_executable(test_decode_image tests/test_decode_image.cpp ${MINGW_COMPAT_SRC})
+    target_link_libraries(test_decode_image PRIVATE particle_codec ${MINGW_PTHREAD_LINK})
 
-add_executable(test_viewer_decode tests/test_viewer_decode.cpp ${MINGW_COMPAT_SRC})
-target_link_libraries(test_viewer_decode PRIVATE particle_codec ${MINGW_PTHREAD_LINK})
+    add_executable(test_viewer_decode tests/test_viewer_decode.cpp ${MINGW_COMPAT_SRC})
+    target_link_libraries(test_viewer_decode PRIVATE particle_codec ${MINGW_PTHREAD_LINK})
 
-add_executable(test_viewer_export tests/test_viewer_export.cpp ${MINGW_COMPAT_SRC})
-target_link_libraries(test_viewer_export PRIVATE particle_codec gdi32 user32 ${MINGW_PTHREAD_LINK})
+    add_executable(test_viewer_export tests/test_viewer_export.cpp ${MINGW_COMPAT_SRC})
+    target_link_libraries(test_viewer_export PRIVATE particle_codec gdi32 user32 ${MINGW_PTHREAD_LINK})
 
-# Multi-frame animation generation + video-frame decode test
-add_executable(test_video_generate tests/test_video_generate.cpp ${MINGW_COMPAT_SRC})
-target_link_libraries(test_video_generate PRIVATE particle_codec gdi32 user32 ${MINGW_PTHREAD_LINK})
+    # Multi-frame animation generation (BMP sequence for ffmpeg)
+    add_executable(test_video_generate tests/test_video_generate.cpp ${MINGW_COMPAT_SRC})
+    target_link_libraries(test_video_generate PRIVATE particle_codec gdi32 user32 ${MINGW_PTHREAD_LINK})
 
+    # Precision benchmark (Win32 BMP rendering)
+    add_executable(test_precision tests/test_precision.cpp ${MINGW_COMPAT_SRC})
+    target_link_libraries(test_precision PRIVATE particle_codec ${MINGW_PTHREAD_LINK})
+endif ()
+
+# Video-frame decode (portable: stb_image + std::filesystem)
 add_executable(test_video_decode tests/test_video_decode.cpp ${MINGW_COMPAT_SRC})
 target_link_libraries(test_video_decode PRIVATE particle_codec ${MINGW_PTHREAD_LINK})
-
-# Precision benchmark
-add_executable(test_precision tests/test_precision.cpp ${MINGW_COMPAT_SRC})
-target_link_libraries(test_precision PRIVATE particle_codec ${MINGW_PTHREAD_LINK})
 
 
 # Win32 GUI viewer (demo/viewer.cpp) is MSVC-only and has no CMake target.

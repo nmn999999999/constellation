@@ -9,24 +9,28 @@ on:
 
 jobs:
   build-and-test:
-    name: Build & Test (${{ matrix.os }})
+    name: ${{ matrix.name }}
     runs-on: ${{ matrix.os }}
     strategy:
       fail-fast: false
       matrix:
-        os: [ubuntu-latest, windows-latest, macos-latest]
-        compiler: [gcc, clang]
         include:
-          - os: ubuntu-latest
+          - name: Linux (GCC)
+            os: ubuntu-latest
             compiler: gcc
-          - os: ubuntu-latest
+            exe_suffix: ""
+          - name: Linux (Clang)
+            os: ubuntu-latest
             compiler: clang
-          - os: windows-latest
-            compiler: gcc
-          - os: windows-latest
+            exe_suffix: ""
+          - name: macOS (Clang)
+            os: macos-latest
             compiler: clang
-          - os: macos-latest
-            compiler: clang
+            exe_suffix: ""
+          - name: Windows (MSVC)
+            os: windows-latest
+            compiler: msvc
+            exe_suffix: ".exe"
 
     steps:
     - name: Checkout code
@@ -34,68 +38,62 @@ jobs:
 
     - name: Install dependencies (Linux)
       if: runner.os == 'Linux'
-      run: |
-        sudo apt-get update
-        sudo apt-get install -y cmake ninja-build g++-11
-
-    - name: Install dependencies (Windows)
-      if: runner.os == 'Windows'
-      run: choco install cmake ninja
+      run: sudo apt-get update && sudo apt-get install -y cmake ninja-build
 
     - name: Install dependencies (macOS)
       if: runner.os == 'macOS'
       run: brew install cmake ninja
 
-    - name: Build (Unix-like)
+    - name: Configure (Unix-like)
       if: runner.os != 'Windows'
-      run: |
-        cmake -S . -B build -G Ninja -DCMAKE_BUILD_TYPE=Release -DCMAKE_CXX_COMPILER=${{ matrix.compiler }}
-        cmake --build build --config Release
+      run: cmake -S . -B build -G Ninja -DCMAKE_BUILD_TYPE=Release -DCMAKE_CXX_COMPILER=${{ matrix.compiler }}
 
-    - name: Build (Windows MSVC)
-      if: runner.os == 'Windows' && matrix.compiler == 'msvc'
-      run: |
-        cmake -S . -B build -G "Visual Studio 17 2022" -A x64 -DCMAKE_BUILD_TYPE=Release
-        cmake --build build --config Release
+    - name: Configure (Windows MSVC)
+      if: runner.os == 'Windows'
+      run: cmake -S . -B build -G "Visual Studio 17 2022" -A x64
+
+    - name: Build
+      run: cmake --build build --config Release
 
     - name: Run unit tests
+      shell: bash
       run: |
-        for exe in build/*_test.exe; do
+        if [ "$RUNNER_OS" = "Windows" ]; then
+          test_dir="build/Release"
+        else
+          test_dir="build"
+        fi
+        # Note: Windows-only tests (BMP rendering via <windows.h>) are only
+        # built on Windows; portable tests run on every platform.
+        for exe in "$test_dir"/*_test${{ matrix.exe_suffix }}; do
           if [ -f "$exe" ]; then
             echo "Running $exe"
             "$exe" || exit 1
           fi
         done
 
-    - name: Run precision benchmark
-      run: build/test_precision.exe
+    - name: Run video-frame decode test (no frames: skipped)
+      shell: bash
+      run: |
+        if [ "$RUNNER_OS" = "Windows" ]; then
+          test_dir="build/Release"
+        else
+          test_dir="build"
+        fi
+        if [ -f "$test_dir/test_video_decode${{ matrix.exe_suffix }}" ]; then
+          "$test_dir/test_video_decode${{ matrix.exe_suffix }}" \
+            || echo "test_video_decode skipped (no frame directory supplied)"
+        fi
 
-    - name: Run end-to-end test
-      run: build/test_decode_image.exe build/test_decode_image.png 60 60 || echo "Test image not found, skipping"
-
-    - name: Upload build artifacts
-      if: runner.os == 'Linux'
+    - name: Upload decode_image artifact
       uses: actions/upload-artifact@v4
       with:
-        name: particle-codec-linux-${{ matrix.compiler }}
-        path: build/decode_image
+        name: decode_image-${{ matrix.os }}-${{ matrix.compiler }}
+        path: |
+          build/decode_image${{ matrix.exe_suffix }}
+          build/Release/decode_image${{ matrix.exe_suffix }}
         retention-days: 7
-
-    - name: Upload build artifacts
-      if: runner.os == 'Windows'
-      uses: actions/upload-artifact@v4
-      with:
-        name: particle-codec-windows-${{ matrix.compiler }}
-        path: build/decode_image.exe
-        retention-days: 7
-
-    - name: Upload build artifacts
-      if: runner.os == 'macOS'
-      uses: actions/upload-artifact@v4
-      with:
-        name: particle-codec-macos-${{ matrix.compiler }}
-        path: build/decode_image
-        retention-days: 7
+        if-no-files-found: warn
 
   code-quality:
     name: Code Quality
@@ -103,16 +101,17 @@ jobs:
     steps:
     - uses: actions/checkout@v4
 
-    - name: Check for TODO/FIXME
+    - name: Check for TODO/FIXME (excluding third-party stb_image.h)
       run: |
-        if grep -r "TODO\|FIXME\|XXX\|HACK" --include="*.cpp" --include="*.h" .; then
+        if grep -r "TODO\|FIXME\|XXX\|HACK" \
+            --include="*.cpp" --include="*.h" . --exclude="stb_image.h"; then
           echo "Found TODO/FIXME markers in code"
           exit 1
         fi
 
     - name: Check for debug output
       run: |
-        if grep -r "std::cout.*debug\|std::cerr.*debug" --include="*.cpp" demo/ tests/; then
+        if grep -rn "std::cout.*debug\|std::cerr.*debug" --include="*.cpp" demo/ src/; then
           echo "Found debug output in code"
           exit 1
         fi

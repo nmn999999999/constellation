@@ -341,8 +341,10 @@ int HomographyCalibrator::calibrate(
     if (!best.valid || bestCoverage < 0.5) return 0;
 
     // 6) Orientation variants: compose with the 8 symmetries of the square
-    //    grid [0,cols) x [0,rows).
-    const int C = gridCols, R = gridRows;
+    //    grid [0,cols) x [0,rows). The explicit casts silence Clang's
+    //    -Wc++11-narrowing (int -> double in a const initializer list).
+    const double C = static_cast<double>(gridCols);
+    const double R = static_cast<double>(gridRows);
     const double S[8][3][3] = {
         {{1, 0, 0}, {0, 1, 0}, {0, 0, 1}},                          // id
         {{0, -1, R}, {1, 0, 0}, {0, 0, 1}},                         // R90
