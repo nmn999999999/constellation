@@ -17,6 +17,7 @@
 //   transition_frames > 0 enables the morph between consecutive data frames.
 //   "ecc" enables Hamming (7,4) error correction on the payload.
 #include "particle_codec/codec.h"
+#include <algorithm>
 #include <iostream>
 #include <string>
 #include <vector>
@@ -56,8 +57,21 @@ static const int kMarkerR = 210, kMarkerG = 50, kMarkerB = 230;
 
 struct DrawParticle {
     double sx, sy; // screen coordinates (pixels)
-    double alpha;  // 0..1 brightness
+    double alpha;  // 0..1 brightness (fade)
+    double size = 1.0;   // glow scale multiplier (big star / small star)
+    double bright = 1.0; // core brightness 0..1 (bright star / dim star)
 };
+
+// Deterministic per-cell pseudo-random value in [0,1]; different salt gives
+// independent values (used for star position offset, size and brightness).
+static double cell_random(int col, int row, int salt) {
+    unsigned int h = static_cast<unsigned int>(col * 73856093u) ^
+                     static_cast<unsigned int>(row * 19349663u) ^
+                     static_cast<unsigned int>(salt * 83492791u);
+    h = (h ^ (h >> 13)) * 0x5bd1e995u;
+    h ^= h >> 15;
+    return (h & 0xFFFF) / 65535.0;
+}
 
 // Deterministic pseudo-random angle for a grid index (used for the drift
 // direction of particles entering/leaving during a morph).
@@ -71,8 +85,8 @@ static double hash_angle(int idx) {
 // slow low-frequency Perlin path (like drifting nebula gas), plus a tiny
 // per-particle wander for organic liveliness. Because the shared global flow
 // keeps every particle's *relative* spacing unchanged, neighbouring cores can
-// never merge — the scanner always resolves all particles.
-// Offset budget vs cell: global ±2.0px + local ±0.4px + codec jitter ±0.96px
+// never merge 鈥?the scanner always resolves all particles.
+// Offset budget vs cell: global 卤2.0px + local 卤0.4px + codec jitter 卤0.96px
 // = max ~3.36px < 4px (half cell), so floor() mapping stays correct and every
 // scannable frame decodes directly (fusion only as a fallback).
 static const double kLocalAmp = 0.4 / kScale;   // per-particle micro-wander (px)
@@ -95,8 +109,21 @@ static std::pair<double, double> drift_offset(const PerlinNoise &noise,
 // Corner markers live in the black margin (outside the grid), so particles of
 // the outermost cells can drift freely without ever being hidden.
 
-// Build the draw list of a pure frame: every particle sits at its grid
-// position plus the continuous Perlin drift (full brightness).
+// Star chart placement: a particle sits at a pseudo-random spot inside its own
+// grid cell (not the centre), so the field looks like a natural star chart
+// instead of a regular lattice. floor() decoding stays exact because the
+// offset is clamped to [0.3, 0.7] inside the cell; combined with the 2px core
+// (4px diameter) the nearest neighbours can never merge (min spacing
+// 0.6 cell = 4.8px > 4px). Size and brightness also vary per cell for
+// bright/dim, large/small stars.
+static std::pair<double, double> star_spot(int col, int row) {
+    double ox = 0.3 + cell_random(col, row, 1) * 0.4; // [0.3, 0.7]
+    double oy = 0.3 + cell_random(col, row, 2) * 0.4;
+    return {ox, oy};
+}
+
+// Build the draw list of a pure frame: every particle sits at its star-chart
+// spot plus the continuous Perlin drift (full brightness).
 static std::vector<DrawParticle> build_frame(const EncodedFrame &frame, double t,
                                              const PerlinNoise &noise) {
     std::vector<DrawParticle> out;
@@ -105,8 +132,13 @@ static std::vector<DrawParticle> build_frame(const EncodedFrame &frame, double t
         double x = frame.particles[i * 2], y = frame.particles[i * 2 + 1];
         int col = static_cast<int>(std::floor(x));
         int row = static_cast<int>(std::floor(y));
+        auto [ox, oy] = star_spot(col, row);
         auto [dx, dy] = drift_offset(noise, col, row, t, i);
-        out.push_back({(x + dx) * kScale, (y + dy) * kScale, 1.0});
+        double px = std::clamp(col + ox + dx, col + 0.3, col + 0.7);
+        double py = std::clamp(row + oy + dy, row + 0.3, row + 0.7);
+        double size = 0.7 + cell_random(col, row, 3) * 0.6;
+        double bright = 0.6 + cell_random(col, row, 4) * 0.4;
+        out.push_back({px * kScale, py * kScale, 1.0, size, bright});
     }
     return out;
 }
@@ -144,23 +176,34 @@ static std::vector<DrawParticle> build_morph(const EncodedFrame &frameA,
     std::vector<DrawParticle> out;
     out.reserve(std::max(posA.size(), posB.size()));
 
+    auto spot = [](int col, int row) { return star_spot(col, row); };
+
     // Particles present in A: common ones ease to B, A-only ones fade+drift out.
     for (const auto &kv : posA) {
         const int idx = kv.first;
         const std::pair<double, double> &pa = kv.second;
         auto cr = gridColRow(pa.first, pa.second);
-        auto [ox, oy] = drift_offset(noise, cr.first, cr.second, t, idx);
+        auto [ox, oy] = star_spot(cr.first, cr.second);
+        auto [dx, dy] = drift_offset(noise, cr.first, cr.second, t, idx);
+        double size = 0.7 + cell_random(cr.first, cr.second, 3) * 0.6;
+        double bright = 0.6 + cell_random(cr.first, cr.second, 4) * 0.4;
         auto it = posB.find(idx);
         if (it != posB.end()) {
-            double bx = pa.first + (it->second.first - pa.first) * morphT;
-            double by = pa.second + (it->second.second - pa.second) * morphT;
-            out.push_back({(bx + ox) * kScale, (by + oy) * kScale, 1.0});
+            // Common particle: layout (star spot) of A and B is identical for
+            // the same cell, so the spot is stable; drift still animates it.
+            double bx = cr.first + ox;
+            double by = cr.second + oy;
+            double px = std::clamp(bx + dx, cr.first + 0.3, cr.first + 0.7);
+            double py = std::clamp(by + dy, cr.second + 0.3, cr.second + 0.7);
+            out.push_back({px * kScale, py * kScale, 1.0, size, bright});
         } else {
             double ang = hash_angle(idx);
             double d = driftPx * morphT;
-            out.push_back({(pa.first + std::cos(ang) * d + ox) * kScale,
-                           (pa.second + std::sin(ang) * d + oy) * kScale,
-                           1.0 - morphT});
+            double bx = cr.first + ox + std::cos(ang) * d;
+            double by = cr.second + oy + std::sin(ang) * d;
+            double px = std::clamp(bx + dx, cr.first + 0.2, cr.first + 0.8);
+            double py = std::clamp(by + dy, cr.second + 0.2, cr.second + 0.8);
+            out.push_back({px * kScale, py * kScale, 1.0 - morphT, size, bright});
         }
     }
     // Particles only in B: fade in while drifting in from the drift distance.
@@ -169,12 +212,17 @@ static std::vector<DrawParticle> build_morph(const EncodedFrame &frameA,
         if (posA.count(idx)) continue;
         const std::pair<double, double> &pb = kv.second;
         auto cr = gridColRow(pb.first, pb.second);
-        auto [ox, oy] = drift_offset(noise, cr.first, cr.second, t, idx);
+        auto [ox, oy] = star_spot(cr.first, cr.second);
+        auto [dx, dy] = drift_offset(noise, cr.first, cr.second, t, idx);
+        double size = 0.7 + cell_random(cr.first, cr.second, 3) * 0.6;
+        double bright = 0.6 + cell_random(cr.first, cr.second, 4) * 0.4;
         double ang = hash_angle(idx + 7);
         double d = driftPx * (1.0 - morphT);
-        out.push_back({(pb.first - std::cos(ang) * d + ox) * kScale,
-                       (pb.second - std::sin(ang) * d + oy) * kScale,
-                       morphT});
+        double bx = cr.first + ox - std::cos(ang) * d;
+        double by = cr.second + oy - std::sin(ang) * d;
+        double px = std::clamp(bx + dx, cr.first + 0.2, cr.first + 0.8);
+        double py = std::clamp(by + dy, cr.second + 0.2, cr.second + 0.8);
+        out.push_back({px * kScale, py * kScale, morphT, size, bright});
     }
     return out;
 }
@@ -196,41 +244,48 @@ static void render_to_bmp(const std::vector<DrawParticle> &particles,
     auto oldBrush = SelectObject(memDc, GetStockObject(DC_BRUSH));
     auto oldPen = SelectObject(memDc, GetStockObject(NULL_PEN));
 
-    // Multi-layer glow for an Apple-Watch nebula look: a wide faint outer
-    // halo, a mid blue glow, and a bright cyan core. Only the core satisfies
-    // the scanner's is_cyan() threshold (R<80, G>100, B>100, B>R+20, G>R+20):
-    // halo and mid-glow colours are deliberately non-cyan so they soften the
-    // image without ever registering as particles.
-    const int pr = 2; // bright cyan core (the only thing the scanner detects)
-    const int grMid = 4;   // mid blue glow (touches but does not overlap 8px cells)
-    const int grOuter = 7; // wide faint halo
+    // Star chart look: halo/glow scale with the star's size, colour/brightness
+    // with its magnitude. Only the bright core satisfies the scanner's
+    // is_cyan() threshold (R<80, G>100, B>100, B>R+20, G>R+20); the halo and
+    // mid-glow are deliberately non-cyan so they never register as particles.
+    const int pr = 2; // bright cyan core (GDI fills ~4px, resolvable by scanner)
 
     auto mix = [](int bg, int target, double a) {
         return static_cast<int>(bg + (target - bg) * a);
     };
 
+    // Two-pass drawing so no core is ever covered by a neighbour's halo:
+    // pass 1 draws every halo/glow, pass 2 draws every bright core on top.
+    // NOTE: GDI Ellipse treats the right/bottom edge as exclusive, so the
+    // drawn disc is centred 0.5px up-left of the given centre; +1 on x2/y2
+    // compensates so the detected centroid lands exactly on (sx, sy).
     for (const auto &p : particles) {
-        // Grid area is offset by the black margin that carries the markers.
         int sx = static_cast<int>(p.sx) + kMargin;
         int sy = static_cast<int>(p.sy) + kMargin;
+        int grOuter = static_cast<int>(5.5 * p.size) + 2; // 5..9
+        int grMid = static_cast<int>(2.8 * p.size) + 1;   // 2..4
+        double b = p.alpha * p.bright;
 
         // Outer halo: faint blue-violet, NOT cyan (G stays < 100).
-        SetDCBrushColor(memDc, RGB(mix(10, 26, p.alpha),
-                                   mix(10, 44, p.alpha),
-                                   mix(10, 92, p.alpha)));
-        Ellipse(memDc, sx - grOuter, sy - grOuter, sx + grOuter, sy + grOuter);
+        SetDCBrushColor(memDc, RGB(mix(10, 26, b),
+                                   mix(10, 40, b),
+                                   mix(10, 86, b)));
+        Ellipse(memDc, sx - grOuter, sy - grOuter,
+                sx + grOuter + 1, sy + grOuter + 1);
 
         // Mid glow: blue, still NOT cyan (G <= 100 at full brightness).
-        SetDCBrushColor(memDc, RGB(mix(10, 0, p.alpha),
-                                   mix(10, 92, p.alpha),
-                                   mix(10, 132, p.alpha)));
-        Ellipse(memDc, sx - grMid, sy - grMid, sx + grMid, sy + grMid);
-
-        // Bright cyan core (what the scanner detects).
-        SetDCBrushColor(memDc, RGB(mix(10, 0, p.alpha),
-                                   mix(10, 190, p.alpha),
-                                   mix(10, 215, p.alpha)));
-        Ellipse(memDc, sx - pr, sy - pr, sx + pr, sy + pr);
+        SetDCBrushColor(memDc, RGB(mix(10, 0, b),
+                                   mix(10, 90, b),
+                                   mix(10, 128, b)));
+        Ellipse(memDc, sx - grMid, sy - grMid,
+                sx + grMid + 1, sy + grMid + 1);
+    }
+    for (const auto &p : particles) {
+        int sx = static_cast<int>(p.sx) + kMargin;
+        int sy = static_cast<int>(p.sy) + kMargin;
+        // Bright cyan core (what the scanner detects), fixed full brightness.
+        SetDCBrushColor(memDc, RGB(0, 190, 215));
+        Ellipse(memDc, sx - pr, sy - pr, sx + pr + 1, sy + pr + 1);
     }
 
     // Corner markers: bright purple squares inside the black margin, so they
@@ -419,3 +474,4 @@ int main(int argc, char *argv[]) {
               << outDir << "/../constellation.mp4" << std::endl;
     return 0;
 }
+

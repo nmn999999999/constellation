@@ -494,12 +494,18 @@ int main(int argc, char *argv[]) {
         std::vector<std::pair<double, double> > fused;
         for (const auto &kv: cellSum) {
             int idx = kv.first;
+            int cc = cellCount[idx];
             // >= 2 votes filters single-frame spurious cells (noise or a
             // particle snapped into a neighbour); real particles appear in
             // ~23 of 24 frames.
-            if (cellCount[idx] < 2) continue;
-            fused.push_back(opt.map(kv.second.first / cellCount[idx],
-                                    kv.second.second / cellCount[idx]));
+            if (cc < 2) continue;
+            // Map the averaged pixel centroid to grid coords with the same
+            // margin-aware formula as the single-frame path (NOT opt, whose
+            // bundle adjustment absorbs the global drift's systematic offset).
+            double cx = kv.second.first / cc;
+            double cy = kv.second.second / cc;
+            fused.emplace_back((cx - gMargin) / fuseScale,
+                               (cy - gMargin) / fuseScale);
         }
         if (fused.empty()) continue;
 
