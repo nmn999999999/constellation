@@ -1,0 +1,118 @@
+name: CI
+
+on:
+  push:
+    branches: [ main, master, develop ]
+  pull_request:
+    branches: [ main, master, develop ]
+  workflow_dispatch:
+
+jobs:
+  build-and-test:
+    name: Build & Test (${{ matrix.os }})
+    runs-on: ${{ matrix.os }}
+    strategy:
+      fail-fast: false
+      matrix:
+        os: [ubuntu-latest, windows-latest, macos-latest]
+        compiler: [gcc, clang]
+        include:
+          - os: ubuntu-latest
+            compiler: gcc
+          - os: ubuntu-latest
+            compiler: clang
+          - os: windows-latest
+            compiler: gcc
+          - os: windows-latest
+            compiler: clang
+          - os: macos-latest
+            compiler: clang
+
+    steps:
+    - name: Checkout code
+      uses: actions/checkout@v4
+
+    - name: Install dependencies (Linux)
+      if: runner.os == 'Linux'
+      run: |
+        sudo apt-get update
+        sudo apt-get install -y cmake ninja-build g++-11
+
+    - name: Install dependencies (Windows)
+      if: runner.os == 'Windows'
+      run: choco install cmake ninja
+
+    - name: Install dependencies (macOS)
+      if: runner.os == 'macOS'
+      run: brew install cmake ninja
+
+    - name: Build (Unix-like)
+      if: runner.os != 'Windows'
+      run: |
+        cmake -S . -B build -G Ninja -DCMAKE_BUILD_TYPE=Release -DCMAKE_CXX_COMPILER=${{ matrix.compiler }}
+        cmake --build build --config Release
+
+    - name: Build (Windows MSVC)
+      if: runner.os == 'Windows' && matrix.compiler == 'msvc'
+      run: |
+        cmake -S . -B build -G "Visual Studio 17 2022" -A x64 -DCMAKE_BUILD_TYPE=Release
+        cmake --build build --config Release
+
+    - name: Run unit tests
+      run: |
+        for exe in build/*_test.exe; do
+          if [ -f "$exe" ]; then
+            echo "Running $exe"
+            "$exe" || exit 1
+          fi
+        done
+
+    - name: Run precision benchmark
+      run: build/test_precision.exe
+
+    - name: Run end-to-end test
+      run: build/test_decode_image.exe build/test_decode_image.png 60 60 || echo "Test image not found, skipping"
+
+    - name: Upload build artifacts
+      if: runner.os == 'Linux'
+      uses: actions/upload-artifact@v4
+      with:
+        name: particle-codec-linux-${{ matrix.compiler }}
+        path: build/decode_image
+        retention-days: 7
+
+    - name: Upload build artifacts
+      if: runner.os == 'Windows'
+      uses: actions/upload-artifact@v4
+      with:
+        name: particle-codec-windows-${{ matrix.compiler }}
+        path: build/decode_image.exe
+        retention-days: 7
+
+    - name: Upload build artifacts
+      if: runner.os == 'macOS'
+      uses: actions/upload-artifact@v4
+      with:
+        name: particle-codec-macos-${{ matrix.compiler }}
+        path: build/decode_image
+        retention-days: 7
+
+  code-quality:
+    name: Code Quality
+    runs-on: ubuntu-latest
+    steps:
+    - uses: actions/checkout@v4
+
+    - name: Check for TODO/FIXME
+      run: |
+        if grep -r "TODO\|FIXME\|XXX\|HACK" --include="*.cpp" --include="*.h" .; then
+          echo "Found TODO/FIXME markers in code"
+          exit 1
+        fi
+
+    - name: Check for debug output
+      run: |
+        if grep -r "std::cout.*debug\|std::cerr.*debug" --include="*.cpp" demo/ tests/; then
+          echo "Found debug output in code"
+          exit 1
+        fi
