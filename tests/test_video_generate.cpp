@@ -33,17 +33,24 @@
 using namespace particle_codec;
 
 static const int kGridCols = 60, kGridRows = 60;
-static const int kExportW = kGridCols * 8; // 480
-static const int kExportH = kGridRows * 8; // 480
+// A black margin around the grid carries the corner markers, so markers never
+// overlap the particles of the outermost cells (particle cores live inside the
+// 480x480 grid area, markers live in the 8px frame).
+static const int kMargin = 8;          // black border for corner markers (px)
+static const int kGridW = kGridCols * 8; // 480
+static const int kGridH = kGridRows * 8; // 480
+static const int kExportW = kGridW + kMargin * 2; // 496
+static const int kExportH = kGridH + kMargin * 2; // 496
 static const double kScale = 8.0;
 static const double kFps = 30.0;
 static const int kAnimFramesPerDataFrame = 30;
 
-// Corner marker geometry: a 4x4 bright-purple square near each corner of the
-// export image. Purple is deliberately NOT cyan so it never registers as a
+// Corner marker geometry: a 4x4 bright-purple square inside the black margin,
+// one near each image corner. Purple is deliberately NOT cyan so it never
+// registers as a particle; the scanner uses it to identify scannable frames.
 // particle; the scanner uses it to identify scannable frames.
 static const int kMarkerSize = 4;
-static const int kMarkerInset = 1;
+static const int kMarkerInset = 2; // centred inside the 8px margin
 static const int kMarkerCountFull = 4; // all four corners on scannable frames
 static const int kMarkerR = 210, kMarkerG = 50, kMarkerB = 230;
 
@@ -60,20 +67,33 @@ static double hash_angle(int idx) {
     return static_cast<double>(h % 3600) / 10.0 * 3.14159265358979323846 / 180.0;
 }
 
-// Perlin drift: every particle floats continuously inside its own grid cell
-// with an independent phase, so the whole field looks like drifting star dust
-// even on pure (scannable) frames. Amplitude 0.35 grid units (~2.8 px) is
-// clearly visible yet stays safely inside the cell (±0.5) for the decoder.
-static const double kDriftAmp = 0.35;
+// Apple-Watch-style particle cloud: the whole field flows as one body along a
+// slow low-frequency Perlin path (like drifting nebula gas), plus a tiny
+// per-particle wander for organic liveliness. Because the shared global flow
+// keeps every particle's *relative* spacing unchanged, neighbouring cores can
+// never merge — the scanner always resolves all particles.
+// Offset budget vs cell: global ±2.0px + local ±0.4px + codec jitter ±0.96px
+// = max ~3.36px < 4px (half cell), so floor() mapping stays correct and every
+// scannable frame decodes directly (fusion only as a fallback).
+static const double kLocalAmp = 0.4 / kScale;   // per-particle micro-wander (px)
+static const double kGlobalAmp = 2.0 / kScale;  // shared nebula flow (px)
 
 static std::pair<double, double> drift_offset(const PerlinNoise &noise,
                                               int col, int row,
                                               double t, int phase) {
-    double nx = noise.fbm(col * 0.05 + t * 0.15, row * 0.05 + phase * 0.13, 3);
-    double ny = noise.fbm(col * 0.05 + phase * 0.13 + 7.7,
-                          row * 0.05 + t * 0.15, 3);
-    return {nx * kDriftAmp, ny * kDriftAmp};
+    // Global nebula flow: identical offset for every particle, so the cloud
+    // breathes and drifts as one without changing internal distances.
+    double gx = noise.fbm(t * 0.05, 3.3, 2) * kGlobalAmp;
+    double gy = noise.fbm(7.7, t * 0.05, 2) * kGlobalAmp;
+    // Per-particle micro-wander: small, so it never merges neighbouring cores.
+    double nx = noise.fbm(col * 0.04 + t * 0.12, row * 0.04 + phase * 0.17, 3);
+    double ny = noise.fbm(col * 0.04 + phase * 0.17 + 7.7,
+                          row * 0.04 + t * 0.12, 3);
+    return {nx * kLocalAmp + gx, ny * kLocalAmp + gy};
 }
+
+// Corner markers live in the black margin (outside the grid), so particles of
+// the outermost cells can drift freely without ever being hidden.
 
 // Build the draw list of a pure frame: every particle sits at its grid
 // position plus the continuous Perlin drift (full brightness).
@@ -176,27 +196,45 @@ static void render_to_bmp(const std::vector<DrawParticle> &particles,
     auto oldBrush = SelectObject(memDc, GetStockObject(DC_BRUSH));
     auto oldPen = SelectObject(memDc, GetStockObject(NULL_PEN));
 
-    const int pr = 2; // max(int(0.35 * scale), 2)
-    const int gr = 4; // pr * 2
+    // Multi-layer glow for an Apple-Watch nebula look: a wide faint outer
+    // halo, a mid blue glow, and a bright cyan core. Only the core satisfies
+    // the scanner's is_cyan() threshold (R<80, G>100, B>100, B>R+20, G>R+20):
+    // halo and mid-glow colours are deliberately non-cyan so they soften the
+    // image without ever registering as particles.
+    const int pr = 2; // bright cyan core (the only thing the scanner detects)
+    const int grMid = 4;   // mid blue glow (touches but does not overlap 8px cells)
+    const int grOuter = 7; // wide faint halo
 
     auto mix = [](int bg, int target, double a) {
         return static_cast<int>(bg + (target - bg) * a);
     };
 
     for (const auto &p : particles) {
-        int glowR = mix(10, 0, p.alpha), glowG = mix(10, 100, p.alpha),
-            glowB = mix(10, 130, p.alpha);
-        int coreR = mix(10, 0, p.alpha), coreG = mix(10, 188, p.alpha),
-            coreB = mix(10, 212, p.alpha);
-        int sx = static_cast<int>(p.sx), sy = static_cast<int>(p.sy);
+        // Grid area is offset by the black margin that carries the markers.
+        int sx = static_cast<int>(p.sx) + kMargin;
+        int sy = static_cast<int>(p.sy) + kMargin;
 
-        SetDCBrushColor(memDc, RGB(glowR, glowG, glowB));
-        Ellipse(memDc, sx - gr, sy - gr, sx + gr, sy + gr);
-        SetDCBrushColor(memDc, RGB(coreR, coreG, coreB));
+        // Outer halo: faint blue-violet, NOT cyan (G stays < 100).
+        SetDCBrushColor(memDc, RGB(mix(10, 26, p.alpha),
+                                   mix(10, 44, p.alpha),
+                                   mix(10, 92, p.alpha)));
+        Ellipse(memDc, sx - grOuter, sy - grOuter, sx + grOuter, sy + grOuter);
+
+        // Mid glow: blue, still NOT cyan (G <= 100 at full brightness).
+        SetDCBrushColor(memDc, RGB(mix(10, 0, p.alpha),
+                                   mix(10, 92, p.alpha),
+                                   mix(10, 132, p.alpha)));
+        Ellipse(memDc, sx - grMid, sy - grMid, sx + grMid, sy + grMid);
+
+        // Bright cyan core (what the scanner detects).
+        SetDCBrushColor(memDc, RGB(mix(10, 0, p.alpha),
+                                   mix(10, 190, p.alpha),
+                                   mix(10, 215, p.alpha)));
         Ellipse(memDc, sx - pr, sy - pr, sx + pr, sy + pr);
     }
 
-    // Corner markers: bright purple squares. Marked frames are scannable.
+    // Corner markers: bright purple squares inside the black margin, so they
+    // never overlap particles. Marked frames are scannable.
     if (markerCount > 0) {
         HBRUSH markerBrush = CreateSolidBrush(RGB(kMarkerR, kMarkerG, kMarkerB));
         auto oldM = SelectObject(memDc, markerBrush);

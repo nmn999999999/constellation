@@ -82,15 +82,18 @@ static std::vector<Detection> detect_by_color(std::vector<uint8_t> &mask, int w,
 }
 
 // Export-style direct scaling (no centering): gx = pixelX * cols / width.
+// `margin` is the black border (8px) that carries the corner markers; it is
+// subtracted so grid scaling stays exact even on marked (v2) frames.
 static std::vector<std::pair<double, double> > direct_grid(
-    const std::vector<Detection> &detections, int w, int h, int cols, int rows) {
-    double scaleX = static_cast<double>(w) / cols;
-    double scaleY = static_cast<double>(h) / rows;
+    const std::vector<Detection> &detections, int w, int h, int cols, int rows,
+    int margin = 0) {
+    double scaleX = static_cast<double>(w - 2 * margin) / cols;
+    double scaleY = static_cast<double>(h - 2 * margin) / rows;
     std::vector<std::pair<double, double> > gp;
     std::vector<bool> cellUsed(cols * rows, false);
     for (auto &c: detections) {
-        double gx = c.cx / scaleX;
-        double gy = c.cy / scaleY;
+        double gx = (c.cx - margin) / scaleX;
+        double gy = (c.cy - margin) / scaleY;
         int col = std::clamp(static_cast<int>(std::floor(gx)), 0, cols - 1);
         int row = std::clamp(static_cast<int>(std::floor(gy)), 0, rows - 1);
         int idx = row * cols + col;
@@ -102,27 +105,28 @@ static std::vector<std::pair<double, double> > direct_grid(
     return gp;
 }
 
-// Corner-marker detection: the generator draws a 4x4 bright-purple square near
-// each corner of scannable frames (transition/morph frames have none). Purple
-// is intentionally not cyan, so it never registers as a particle. Returns the
-// number of corners carrying a marker (0..4).
+// Corner-marker detection: the generator draws a 4x4 bright-purple square in
+// the black margin of each corner of scannable frames (transition/morph frames
+// have none). Purple is intentionally not cyan, so it never registers as a
+// particle. Returns the number of corners carrying a marker (0..4).
 static int detect_corner_markers(const unsigned char *img, int w, int h) {
     auto cornerHas = [&](int x0, int y0) {
         int purple = 0;
-        for (int dy = 0; dy < 5 && y0 + dy < h; dy++)
-            for (int dx = 0; dx < 5 && x0 + dx < w; dx++) {
+        for (int dy = 0; dy < 6 && y0 + dy < h; dy++)
+            for (int dx = 0; dx < 6 && x0 + dx < w; dx++) {
                 const unsigned char *p = img + ((y0 + dy) * w + (x0 + dx)) * 3;
                 // bright purple: high R, high B, low G, clearly red-shifted
                 if (p[0] > 140 && p[2] > 140 && p[1] < 110 && p[0] > p[1] + 60)
                     purple++;
             }
-        return purple >= 4; // at least 4 purple pixels inside the 5x5 window
+        return purple >= 4; // at least 4 purple pixels inside the 6x6 window
     };
+    // Marker spans (inset, inset)..(inset+4) with inset=2 inside the 8px margin.
     int n = 0;
-    if (cornerHas(1, 1)) n++;
-    if (cornerHas(w - 5, 1)) n++;
-    if (cornerHas(1, h - 5)) n++;
-    if (cornerHas(w - 5, h - 5)) n++;
+    if (cornerHas(2, 2)) n++;
+    if (cornerHas(w - 6, 2)) n++;
+    if (cornerHas(2, h - 6)) n++;
+    if (cornerHas(w - 6, h - 6)) n++;
     return n;
 }
 
@@ -135,6 +139,7 @@ int main(int argc, char *argv[]) {
     std::string payloadPath = (argc > 2) ? argv[2] : "";
 
     const int gridCols = 60, gridRows = 60;
+    const double kScalePx = 8.0; // px per grid cell in the export image
     ParticleCodec codec("particle_codec", gridCols, gridRows);
     FrameAssembler assembler;
 
@@ -188,6 +193,7 @@ int main(int argc, char *argv[]) {
     std::vector<int> seqSuccess(64, 0); // data-frame success counts
     std::vector<std::string> failByStage;
     int globalW = 0, globalH = 0; // image size of the first loaded frame
+    int gMargin = 0;              // black margin detected on scannable frames
 
     for (size_t fi = 0; fi < files.size(); fi++) {
         int w = 0, h = 0, channels = 0;
@@ -215,18 +221,28 @@ int main(int argc, char *argv[]) {
         }
         scannableFrames++;
 
+        // Marked frames come from the v2 generator: a black margin of
+        // kMarginPx pixels around the grid carries the markers. Skip it so the
+        // margin (and any marker bleed after compression) never counts as a
+        // particle and grid scaling stays correct.
+        const int margin = 8;
+        gMargin = margin;
         int total = w * h;
         std::vector<uint8_t> mask(total, 0);
         std::vector<float> weights(total, 0);
-        for (int i = 0; i < total; i++)
-            if (is_cyan(img[i * 3], img[i * 3 + 1], img[i * 3 + 2])) {
-                mask[i] = 1;
-                weights[i] = static_cast<float>(img[i * 3 + 1] + img[i * 3 + 2]);
+        for (int y = margin; y < h - margin; y++) {
+            for (int x = margin; x < w - margin; x++) {
+                int i = y * w + x;
+                if (is_cyan(img[i * 3], img[i * 3 + 1], img[i * 3 + 2])) {
+                    mask[i] = 1;
+                    weights[i] = static_cast<float>(img[i * 3 + 1] + img[i * 3 + 2]);
+                }
             }
+        }
         stbi_image_free(img);
 
         auto detections = detect_by_color(mask, w, h, &weights);
-        auto gp = direct_grid(detections, w, h, gridCols, gridRows);
+        auto gp = direct_grid(detections, w, h, gridCols, gridRows, margin);
 
         std::vector<std::pair<double, double> > centroids;
         for (const auto &d: detections)
@@ -394,10 +410,15 @@ int main(int argc, char *argv[]) {
     if (haveGlobalMap) {
         opt = globalMap;
     } else if (globalW > 0) {
-        // Axis-aligned fallback: pixel -> unit grid by image size.
-        opt.a = static_cast<double>(gridCols) / globalW;
-        opt.e = static_cast<double>(gridRows) / globalH;
-        opt.b = opt.c = opt.d = opt.f = 0;
+        // Axis-aligned fallback: pixel -> unit grid by image size, accounting
+        // for the black margin (8px) that carries the corner markers.
+        double effW = static_cast<double>(globalW) - 2 * gMargin;
+        double effH = static_cast<double>(globalH) - 2 * gMargin;
+        opt.a = static_cast<double>(gridCols) / effW;
+        opt.e = static_cast<double>(gridRows) / effH;
+        opt.c = -gMargin * opt.a;
+        opt.f = -gMargin * opt.e;
+        opt.b = opt.d = 0;
     }
     int baIter = 0;
     if (allRaw.size() >= 64) {
@@ -411,7 +432,9 @@ int main(int argc, char *argv[]) {
                 int row = std::clamp(static_cast<int>(std::floor(m.second)),
                                      0, gridRows - 1);
                 double ex = m.first - (col + 0.5), ey = m.second - (row + 0.5);
-                if (ex * ex + ey * ey > 0.35 * 0.35) continue;
+                // Drift budget is ~0.42 grid units; keep 0.45 so animated
+                // particles (with margin-shifted coords) still vote.
+                if (ex * ex + ey * ey > 0.45 * 0.45) continue;
                 int idx = row * gridCols + col;
                 cellSum[idx].first += p.first; // average in image space
                 cellSum[idx].second += p.second;
@@ -441,19 +464,27 @@ int main(int argc, char *argv[]) {
     // Fuse collected frames per sequence using the optimized transform, then
     // decode (with ECC fallback).
     int fusedSeqs = 0, fusedAdds = 0;
+    // Fusion maps pixels to the grid the same way the single-frame path does
+    // (margin-aware direct scaling). The bundle-adjusted `opt` can absorb the
+    // global drift's systematic offset and push edge particles across cell
+    // boundaries, so do not use it here.
+    double fuseScale = (globalW - 2 * gMargin > 0)
+                           ? static_cast<double>(globalW - 2 * gMargin) / gridCols
+                           : kScalePx;
     for (int seq = 0; seq < static_cast<int>(fusion.size()); seq++) {
         if (fusion[seq].empty()) continue;
 
         std::map<int, std::pair<double, double> > cellSum;
         std::map<int, int> cellCount;
         for (const auto &p: fusion[seq]) {
-            auto m = opt.map(p.first, p.second);
-            int col = std::clamp(static_cast<int>(std::floor(m.first)),
-                                 0, gridCols - 1);
-            int row = std::clamp(static_cast<int>(std::floor(m.second)),
-                                 0, gridRows - 1);
-            double ex = m.first - (col + 0.5), ey = m.second - (row + 0.5);
-            if (ex * ex + ey * ey > 0.35 * 0.35) continue;
+            double gx = (p.first - gMargin) / fuseScale;
+            double gy = (p.second - gMargin) / fuseScale;
+            int col = std::clamp(static_cast<int>(std::floor(gx)), 0, gridCols - 1);
+            int row = std::clamp(static_cast<int>(std::floor(gy)), 0, gridRows - 1);
+            double ex = gx - (col + 0.5), ey = gy - (row + 0.5);
+            // Drift budget is ~0.42 grid units; keep 0.45 so animated
+            // particles (with margin-shifted coords) still vote.
+            if (ex * ex + ey * ey > 0.45 * 0.45) continue;
             int idx = row * gridCols + col;
             cellSum[idx].first += p.first;
             cellSum[idx].second += p.second;
@@ -565,6 +596,11 @@ int main(int argc, char *argv[]) {
             fusedSeqs++;
             fusedAdds++;
             seqSuccess[seq] = fusionFrames[seq];
+        } else {
+            // Single frames already covered this seq; fusion decoded it fine
+            // but the duplicate add was rejected.
+            std::cout << "  fuse seq " << seq
+                      << ": decoded OK (dup add rejected)\n";
         }
     }
     std::cout << "Fusion: " << fusedSeqs << " seq(s) recovered from "
