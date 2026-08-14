@@ -45,9 +45,7 @@ namespace particle_codec {
         }
         // Natural star chart: each centre sits at a deterministic spot inside
         // its cell (0.4..0.6), so the field never looks like a lattice. The
-        // offset stays well below 1 cell, so plain floor() recovers the cell,
-        // and small enough (±0.1 cell) that geometry calibration keeps its
-        // tolerance assumptions.
+        // offset stays well below 1 cell, so plain floor() recovers the cell.
         double ox = 0.4 + cellHash01(col, row, 1) * 0.2;
         double oy = 0.4 + cellHash01(col, row, 2) * 0.2;
         return {(col + ox) * cellWidth, (row + oy) * cellHeight};
