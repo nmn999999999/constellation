@@ -155,10 +155,10 @@ int main(int argc, char *argv[]) {
     GridCalibrator::Affine globalMap;
     bool haveGlobalMap = false;
 
-    // List image files with FindFirstFileA (ANSI) instead of
-    // std::filesystem::directory_iterator: the latter throws on non-ASCII
-    // (e.g. Chinese) paths because of its narrow->wide conversion.
+    // List image files. On Windows use FindFirstFileA (ANSI) so Chinese paths
+    // work; elsewhere use std::filesystem (no narrow->wide conversion issue).
     std::vector<std::string> files;
+#ifdef _WIN32
     {
         std::string pattern = dir;
         if (!pattern.empty() && pattern.back() != '\\' && pattern.back() != '/')
@@ -179,6 +179,15 @@ int main(int argc, char *argv[]) {
             FindClose(hFind);
         }
     }
+#else
+    for (const auto &entry : std::filesystem::directory_iterator(dir)) {
+        auto ext = entry.path().extension().string();
+        std::transform(ext.begin(), ext.end(), ext.begin(), ::tolower);
+        if (ext == ".png" || ext == ".bmp" || ext == ".jpg" || ext == ".jpeg") {
+            files.push_back(entry.path().string());
+        }
+    }
+#endif
     std::sort(files.begin(), files.end());
 
     std::cout << "=== Video Frame Decode ===" << std::endl;
